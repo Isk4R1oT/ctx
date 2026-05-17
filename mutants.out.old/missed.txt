@@ -1,3 +1,0 @@
-src/lib.rs:89:41: replace && with || in run_app
-src/lib.rs:89:27: replace && with || in run_app
-src/color.rs:39:5: replace is_terminal -> bool with false

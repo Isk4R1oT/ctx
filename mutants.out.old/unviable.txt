@@ -1,1 +1,0 @@
-src/color.rs:122:5: replace for_stream -> ColorMode with Default::default()
