@@ -297,3 +297,73 @@ obtained; substituted by tool-grounded checks (no unsafe/async; `pct`
 `checked_div` div-by-zero-safe; `.get()`-only determinism; serde_json
 `remaining_depth:128`) — recorded as a substitution, not claimed as an
 independent SHIP.
+
+## D-009 — F1 blindness root cause: capture-boundary lossy UTF-8 destroys compressed wire bodies; NOT a parser bug (2026-05-17)
+
+### Status: LOCKED (diagnosis only — zero production code changed). Supersedes the *mechanism* of D-007 **and D-008** (their standing TDD/real-capture rules RETAINED). Does not relitigate D-001..D-006.
+
+**D-008 was insufficient (third confirmed false green).** D-008 closed
+the class "by construction" on the premise that `ctx view` (F2)
+*verified the real OpenRouter body is valid JSON*. That premise was a
+forbidden constructive proof on an *uncompressed* body; it never tested
+a real compressed-request client. F1-FIX3-BRIEF §0 reproduced the
+symptom; this entry pins the true mechanism on a **verbatim real `ctx
+run --save` capture** (not an approximation).
+
+**Root cause (evidence-verified, on real captures, HEAD `f866dac`).**
+F1 goes blind — `compose` Layer-2 `raw-body (structured parse failed;
+counted verbatim)`, 0 findings — for any real client that sends a
+**compressed request body** (`Content-Encoding: gzip` demonstrated;
+httpx / many agent stacks / corporate & OpenRouter proxies do this).
+It is **NOT** in `adapter::parse` (where D-007 serde-null and D-008
+Value-walk both wrongly patched — that code never sees real bytes).
+The bug is the **F0 capture boundary**: `src/timeline.rs:73`
+`String::from_utf8_lossy(body)` runs on the raw wire bytes *before*
+provider-detect / parse / persist. A non-UTF-8 (compressed) body has
+every non-UTF-8 byte rewritten to U+FFFD at capture, so (a)
+`serde_json::from_slice` cannot parse it and (b) the original bytes
+are **destroyed at capture and unrecoverable post-hoc** — the saved
+BLOB is the mangled string (`src/store.rs:90`), and request headers
+(the `Content-Encoding` signal) are **not persisted** at all
+(`store.rs` step schema; `load()` replays with `&[]` headers).
+
+**Evidence (real `ctx --save` captures, this session).**
+- gzip capture stored request body begins `1F EF BF BD 08 00 …`;
+  real gzip magic is `1F 8B 08 00` — the `8B` byte is rewritten to
+  `EF BF BD` (UTF-8 for U+FFFD `REPLACEMENT CHARACTER`). Provider
+  WAS detected (`open_ai_compat`, path `/v1/chat/completions`) ⇒ this
+  is a parse/destruction failure (H2), **not** a detect failure (H1).
+- plain capture stored body begins `7B 22 6D 6F` (`{"mo`) and Layer-1
+  decomposes it correctly (system/tool-schemas/history + indictment).
+- Real-capture matrix on `f866dac`: plain-200 ✅, `stream:true` ✅,
+  `tools:null` ✅, 2-turn ✅ (4 indictments), **`Content-Encoding:
+  gzip` ❌ Layer-2 / 0 findings** — single isolated variable.
+- `ctx open gzip.db` reproduces it post-hoc (`assembled=None`),
+  confirming the destruction is persisted, not transient.
+
+**Scope correction (flagged, NOT silently scope-crept — D-006 style).**
+F1-FIX3-BRIEF §0/§1 frame the defect as "Layer-1 cannot decompose a
+real **valid-JSON** body" and mandate a **F1-only** fix. The evidence
+refutes that framing: the captured bytes are genuinely **not valid
+JSON** (destroyed gzip), so Layer-2 firing is *correct given the
+destroyed input* — the real fault is upstream, at the **shared F0
+capture/persistence path** (`timeline::record_request` +
+`store.rs`), which `agentlock`/`guard` also build on (caliper
+CLAUDE.md). A correct fix is therefore **not F1-only** and touches a
+one-way-door design question (does ctx persist decoded bytes, or raw
+bytes + the encoding?). Halted for that decision before any code —
+per the brief’s own "record honest deviations, not silently" + the
+standing rule that a wire-parse defect is pinned on a real capture.
+
+**Recommended fix (proposed; not yet implemented).** At the capture
+boundary, on the original `&[u8]` *before* the lossy String: if
+`Content-Encoding` (live) or a magic-byte sniff (`1F 8B` gzip;
+post-hoc, header-independent — required because headers are not
+persisted) indicates compression, decompress; use the decompressed
+bytes for detect/parse **and persist them** so `ctx open` round-trips.
+Decompression failure ⇒ keep raw ⇒ legitimate Layer-2 (genuinely
+opaque). F2/F3 on *clean* bodies stay byte-identical (UTF-8 lossy is
+identity on valid JSON) ⇒ no existing-test regression; F2 on
+compressed bodies improves (garbage → real JSON) rather than
+regressing. To be confirmed against PROJECT.md "verbatim" semantics
+with the user before step B/C.

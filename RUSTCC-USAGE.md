@@ -153,3 +153,33 @@
 - Honest status: real fix; class closed by construction grounded in
   F2's verified valid-JSON observation; NOT re-confirmed by a fresh
   live OpenRouter hit (key revoked). D-008 records all of the above.
+
+---
+
+## F1-FIX3 — step A (diagnosis only; rust-cc loop NOT engaged: zero `.rs` changed)
+
+- **rust-cc artifact:** none, and that is correct for step A. The
+  brief §3-A mandates "zero production code changed yet"; no `cargo`
+  edit/check/fix was run, no PostToolUse `rustcc` digest produced —
+  the compiler-truth loop engages at step C (the fix), not for a
+  read-only diagnosis. A missing artifact here is NOT a bypass.
+- **Method:** static path trace (`proxy.rs`→`timeline.rs`→
+  `adapter.rs`→`compose.rs`) proved the Layer-2 string requires
+  `assembled==None` for all steps ⇒ exactly H1 (detect→None) or H2
+  (`from_slice`→Err); H3 (parsed-but-empty) eliminated by code.
+- **Real captures (NOT synthetic, per brief §1):** built `ctx` at
+  `f866dac`; ran 5 genuine `ctx run --save` captures of a real httpx
+  agent client against OpenRouter (authorized limited key; real 200
+  on the plain run, cost $0.0000231; variants 403/404 — request
+  still captured BEFORE forward). plain/stream/tools-null/2-turn =
+  Layer-1 ✅; `Content-Encoding: gzip` = Layer-2 ❌ (reproduces §0).
+- **Evidence pinned in D-009:** stored gzip body `1F EF BF BD 08…`
+  (`8B`→`EF BF BD`=U+FFFD) vs plain `7B 22 6D 6F`=`{"mo`; provider
+  detected ⇒ H2. Root cause = `timeline.rs:73` lossy String at the
+  F0 capture boundary, NOT `adapter::parse` (D-007/D-008 misfire).
+- **HALT (honest, per §4 “record deviations, not silently”).** The
+  verified mechanism contradicts brief §0/§1 (defect is NOT a
+  valid-JSON Layer-1 failure; fix is NOT F1-only — it is the shared
+  F0 capture/persistence path). Surfaced to the user for the
+  scope/one-way-door decision BEFORE step B/C. No code, no fixture,
+  no green claimed.
