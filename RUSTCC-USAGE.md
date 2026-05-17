@@ -50,3 +50,41 @@
   construction. This is the §3 phase EXIT design (A = prove red; harden
   = C), not a bypassed gate; full-F1-surface `--in-diff` mutants run at
   step C with 0-missed required.
+
+## Step B — fix F1 (adapter.rs lenient null-tolerant parse) + Step C — no-regression + harden
+
+- **Brief-deviation, recorded honestly (not silent, per §1 PROJECT.md
+  canonical-on-conflict):** §3-B says "fix compose.rs", but the
+  TDD-probe + rust-review proved the root cause is `adapter.rs`
+  (`#[serde(default)]` ≠ explicit `null`). `compose.rs` already
+  decomposes BOTH shapes provider-agnostically (its OpenAI
+  decomposition test passes pre-fix). Fixing `adapter.rs` is the
+  minimal change that upholds D-001 (adapter = the single
+  wire-normalization layer), §0 "do NOT re-architect", and yields the
+  least regression surface (compose/F1/F0/F2/F3 untouched). Recorded
+  here, in D-007, and the commit.
+- Change: `null_or_missing_as_default` serde helper +
+  `#[serde(default, deserialize_with=…)]` on `AnthropicReq.messages/
+  tools` + `OpenAiReq.messages/tools` (twin symmetry — same
+  `parse(...).ok()` blind-spot code path).
+- Artifacts (real, this session):
+  - `rustcc digest --from check`: **green** (cargo check + clippy clean)
+    after the edit; commit-gate clippy/fmt pass (NOT bypassed).
+  - `cargo nextest`: **92/92** — `f1_not_blind_on_realworld_openai_
+    tools_null` now PASSES (red→green); all Anthropic F1, F1 snapshots,
+    F0/F2/F3 (wire_capture f2/f3 + snapshots) PASS = zero regression.
+  - `cargo test --doc`: ok (0 doctests).
+  - `/rust-review` ×2 (`rust-reviewer` + `runtime-soundness`):
+    **SHIP, 0 findings** — serde matrix empirically replicated
+    (missing→[], null→[], value→value, malformed→Err preserved);
+    recursion-bounded, panic-free; faithfulness strictly ≥ prior;
+    pure-measurement intact; Anthropic twin = intended symmetry not
+    creep; no consequential findings to apply.
+  - `/rust-harden`: `cargo deny` advisories+bans+licenses+sources ok;
+    `cargo machete` clean; **`cargo mutants --in-diff` (F1-fix
+    surface): 1 found / 1 caught / 0 missed** (Law 11 — the changed
+    code's mutant is killed by the step-A/adapter tests).
+- B EXIT (step-A test passes; F1 correct on BOTH shapes) ✓.
+  C EXIT (no regression; review SHIP 0-high; harden 0-missed; all
+  green via the loop) ✓ — committed atomically (B+C: the fix commit is
+  the §2-gated unit; a separate empty C commit would be meaningless).

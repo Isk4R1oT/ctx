@@ -8,6 +8,21 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Accept a missing key, an explicit `null`, OR the value — all mapped
+/// to `T::default()` for the first two. `#[serde(default)]` alone only
+/// covers the *missing* case; real OpenAI/agent clients send explicit
+/// `"tools": null` / `"messages": null` on a no-op turn, which would
+/// otherwise fail the whole parse and blind F1 (the wire is lenient by
+/// contract — `docs/PROJECT.md` §3/§8; D-001). Pure parsing leniency,
+/// no semantics added.
+fn null_or_missing_as_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
@@ -66,9 +81,9 @@ struct AnthropicReq {
     model: Option<String>,
     #[serde(default)]
     system: serde_json::Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_or_missing_as_default")]
     messages: Vec<RawMessage>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_or_missing_as_default")]
     tools: Vec<AnthropicTool>,
 }
 
@@ -82,9 +97,9 @@ struct AnthropicTool {
 #[derive(Debug, Deserialize)]
 struct OpenAiReq {
     model: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_or_missing_as_default")]
     messages: Vec<RawMessage>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_or_missing_as_default")]
     tools: Vec<OpenAiTool>,
 }
 
