@@ -1,0 +1,13 @@
+---
+source: tests/snapshots.rs
+expression: s
+---
+[1m[38;2;217;119;87m⏺[0m Diff [2mstep 0 -> 1[0m
+[2m  {[0m
+[2m    "system": "be terse",[0m
+[38;2;191;77;67m[48;2;58;29;29m-   "messages": [ "first" ][0m
+[38;2;120;140;93m[48;2;29;51;32m+   "messages": [ "first", "second" ][0m
+[2m  }[0m
+
+[1m[38;2;217;119;87mSummary[0m
+  [2m+1/-1 lines · +12/-9 tokens · offline o200k approximation, ±10% (never calls an API)[0m

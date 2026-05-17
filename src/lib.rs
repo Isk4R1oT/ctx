@@ -11,6 +11,7 @@ pub mod adapter;
 pub mod cli;
 pub mod color;
 pub mod compose;
+pub mod diff;
 pub mod proxy;
 pub mod render;
 pub mod run;
@@ -90,6 +91,17 @@ pub async fn run_app(cli: Cli) -> Result<i32> {
                 view::pager(&sel)?;
             } else {
                 view::oneshot(&mut out, stdout_tty, stdout_mode, &sel)?;
+            }
+            out.flush()?;
+            Ok(0)
+        }
+        Some(Cmd::Diff { path, from, to }) => {
+            let timeline = store::load(&path)?;
+            let d = diff::diff(&timeline, from, to)?;
+            if cli.json {
+                diff::json(&mut out, &d)?;
+            } else {
+                render::diff_block(&mut out, stdout_mode, &d)?;
             }
             out.flush()?;
             Ok(0)

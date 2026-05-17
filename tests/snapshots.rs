@@ -173,3 +173,63 @@ fn f2_pager_frame_render() {
     let sel = f2_step();
     insta::assert_snapshot!(view::render_to_string(&sel, 64, 10).unwrap());
 }
+
+// --- F3 per-step context diff contracts -------------------------------
+
+// Two-step timeline built inline ⇒ `diff(.., None, None)` is a genuine
+// documented invariant (Law 9), like the F2 fixture.
+#[allow(clippy::expect_used)]
+fn f3_diff() -> ctx::diff::StepDiff {
+    let mut t = Timeline::new();
+    t.record_request(
+        "POST",
+        "/v1/messages",
+        &[],
+        b"{\n  \"system\": \"be terse\",\n  \"messages\": [ \"first\" ]\n}",
+    );
+    t.record_request(
+        "POST",
+        "/v1/messages",
+        &[],
+        b"{\n  \"system\": \"be terse\",\n  \"messages\": [ \"first\", \"second\" ]\n}",
+    );
+    ctx::diff::diff(&t, None, None).expect("fixture: 2 steps present")
+}
+
+#[test]
+fn f3_diff_json_contract() {
+    insta::assert_json_snapshot!(f3_diff());
+}
+
+#[test]
+fn f3_diff_plain_grep_clean() {
+    let mut buf = Vec::new();
+    ctx::render::diff_block(&mut buf, ColorMode::None, &f3_diff()).unwrap();
+    let s = String::from_utf8(buf).unwrap();
+    assert!(!s.contains('\u{1b}'), "plain diff emits zero escapes");
+    assert!(s.lines().next().unwrap().starts_with("> diff step 0 -> 1"));
+    insta::assert_snapshot!(s);
+}
+
+#[test]
+fn f3_diff_tty_render() {
+    let mut buf = Vec::new();
+    ctx::render::diff_block(&mut buf, ColorMode::Truecolor, &f3_diff()).unwrap();
+    let s = String::from_utf8(buf).unwrap();
+    assert!(s.contains('\u{23FA}'), "doc-11 ⏺ action glyph");
+    assert!(!s.chars().any(|c| c as u32 >= 0x1_F000), "no emoji");
+    insta::assert_snapshot!(s);
+}
+
+#[test]
+fn f3_diff_ansi256_uses_the_256_bg_fills() {
+    // doc-11 §5.1: on Ansi256, add/remove rows carry the 256-indexed
+    // diff backgrounds (22 add / 52 remove). Pins the diff_bg Ansi256
+    // arms (mutation: deleting them would drop the fills silently).
+    let mut buf = Vec::new();
+    ctx::render::diff_block(&mut buf, ColorMode::Ansi256, &f3_diff()).unwrap();
+    let s = String::from_utf8(buf).unwrap();
+    assert!(s.contains("\u{1b}[48;5;22m"), "Ansi256 add bg = 22");
+    assert!(s.contains("\u{1b}[48;5;52m"), "Ansi256 remove bg = 52");
+    assert!(!s.chars().any(|c| c as u32 >= 0x1_F000), "no emoji");
+}

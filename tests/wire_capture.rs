@@ -232,6 +232,81 @@ async fn f2_view_is_byte_exact_vs_captured_wire_bytes() {
 }
 
 #[tokio::test]
+async fn f3_diff_is_correct_on_a_real_multi_step_run() {
+    // F3 EXIT: a real 2-step run; `ctx diff` reports the added lines
+    // and the positive token delta of the grown second prompt.
+    let anthropic = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"a"})))
+        .mount(&anthropic)
+        .await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("s.sqlite");
+    // Turn 2's prompt carries an extra appended message (grown history).
+    let small = r#"{"model":"m","messages":[{"role":"user","content":"first"}]}"#;
+    let grown = r#"{"model":"m","messages":[{"role":"user","content":"first"},{"role":"assistant","content":"reply"},{"role":"user","content":"second turn question"}]}"#;
+    let script = format!(
+        "curl -s -o /dev/null -X POST \"$ANTHROPIC_BASE_URL/v1/messages\" -d '{small}'; \
+         curl -s -o /dev/null -X POST \"$ANTHROPIC_BASE_URL/v1/messages\" -d '{grown}'"
+    );
+    let run = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .args([
+            "run",
+            "--save",
+            db.to_str().unwrap(),
+            "--",
+            "sh",
+            "-c",
+            &script,
+        ])
+        .env("CTX_UPSTREAM_ANTHROPIC", anthropic.uri())
+        .env("NO_COLOR", "1")
+        .output()
+        .await
+        .expect("spawn ctx run");
+    assert!(run.status.success());
+
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .args(["--json", "diff", db.to_str().unwrap()])
+        .env("NO_COLOR", "1")
+        .output()
+        .await
+        .expect("spawn ctx diff");
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("ctx diff --json");
+    assert_eq!(v["from"], 0);
+    assert_eq!(v["to"], 1);
+    assert!(
+        v["added_tokens"].as_u64().unwrap() > v["removed_tokens"].as_u64().unwrap(),
+        "the grown turn-2 prompt must add more tokens than it removes"
+    );
+    assert!(v["added_lines"].as_u64().unwrap() >= 1);
+    let lines = v["lines"].as_array().unwrap();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l["op"] == "add"
+                && l["text"].as_str().unwrap().contains("second turn question")),
+        "the diff must show the appended message as an addition"
+    );
+
+    // Plain mode is grep-clean: zero escapes, one record per line.
+    let plain = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .args(["diff", db.to_str().unwrap()])
+        .env("NO_COLOR", "1")
+        .output()
+        .await
+        .expect("spawn ctx diff plain");
+    assert!(plain.status.success());
+    assert!(!plain.stdout.contains(&0x1b), "plain diff: zero escapes");
+    let s = String::from_utf8_lossy(&plain.stdout);
+    assert!(s.lines().next().unwrap().starts_with("> diff step 0 -> 1"));
+    assert!(s.contains("summary: +"));
+}
+
+#[tokio::test]
 async fn bare_invocation_renders_the_banner() {
     let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
         .arg("--color")

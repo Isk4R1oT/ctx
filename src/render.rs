@@ -75,6 +75,112 @@ pub fn verbatim_header(
     Ok(())
 }
 
+// doc-11 §1.2 success/error + §5.1 diff backgrounds.
+fn success(mode: ColorMode) -> Style {
+    let c = match mode {
+        ColorMode::Truecolor => Some(Color::Rgb(RgbColor(0x78, 0x8C, 0x5D))),
+        ColorMode::Ansi256 => Some(Color::Ansi256(anstyle::Ansi256Color(107))),
+        ColorMode::Ansi16 => Some(Color::Ansi(AnsiColor::Green)),
+        ColorMode::None => None,
+    };
+    Style::new().fg_color(c)
+}
+
+fn error(mode: ColorMode) -> Style {
+    let c = match mode {
+        ColorMode::Truecolor => Some(Color::Rgb(RgbColor(0xBF, 0x4D, 0x43))),
+        ColorMode::Ansi256 => Some(Color::Ansi256(anstyle::Ansi256Color(167))),
+        ColorMode::Ansi16 => Some(Color::Ansi(AnsiColor::Red)),
+        ColorMode::None => None,
+    };
+    Style::new().fg_color(c)
+}
+
+// Background fills only on Truecolor/Ansi256 (doc-11 §5.1); 16/None rely
+// solely on the +/-/space prefixes (survives copy-paste & `| diff`).
+fn diff_bg(mode: ColorMode, add: bool) -> Style {
+    let c = match (mode, add) {
+        (ColorMode::Truecolor, true) => Some(Color::Rgb(RgbColor(0x1D, 0x33, 0x20))),
+        (ColorMode::Truecolor, false) => Some(Color::Rgb(RgbColor(0x3A, 0x1D, 0x1D))),
+        (ColorMode::Ansi256, true) => Some(Color::Ansi256(anstyle::Ansi256Color(22))),
+        (ColorMode::Ansi256, false) => Some(Color::Ansi256(anstyle::Ansi256Color(52))),
+        _ => None,
+    };
+    Style::new().bg_color(c)
+}
+
+/// F3 per-step context diff (doc-11 §5.1). `ColorMode::None` ⇒ a
+/// grep-clean unified record per line (one line, `+ `/`- `/`  ` prefix,
+/// zero escapes); a TTY adds success/error color + (Truecolor/256) bg.
+///
+/// # Errors
+/// Propagates write errors.
+pub fn diff_block(
+    w: &mut impl Write,
+    mode: ColorMode,
+    d: &crate::diff::StepDiff,
+) -> std::io::Result<()> {
+    use crate::diff::Op;
+    let label = crate::tokenizer::ACCURACY_LABEL;
+
+    if mode == ColorMode::None {
+        writeln!(w, "> diff step {} -> {}", d.from, d.to)?;
+        for l in &d.lines {
+            let sign = match l.op {
+                Op::Add => '+',
+                Op::Remove => '-',
+                Op::Keep => ' ',
+            };
+            writeln!(w, "{sign} {}", l.text)?;
+        }
+        writeln!(
+            w,
+            "summary: +{}/-{} lines, +{}/-{} tokens ({label})",
+            d.added_lines, d.removed_lines, d.added_tokens, d.removed_tokens
+        )?;
+        return Ok(());
+    }
+
+    let acc = accent(mode);
+    let faint = dim();
+    writeln!(
+        w,
+        "{} Diff {}",
+        paint(acc, &ACTION.to_string()),
+        paint(faint, &format!("step {} -> {}", d.from, d.to))
+    )?;
+    for l in &d.lines {
+        let (sign, fg) = match l.op {
+            Op::Add => ('+', success(mode)),
+            Op::Remove => ('-', error(mode)),
+            Op::Keep => (' ', faint),
+        };
+        // One combined style so the bg fill actually spans the row
+        // (doc-11 §5.1: added/removed lines carry diff_*_bg).
+        let bg = match l.op {
+            Op::Add => diff_bg(mode, true),
+            Op::Remove => diff_bg(mode, false),
+            Op::Keep => Style::new(),
+        };
+        let style = fg.bg_color(bg.get_bg_color());
+        writeln!(w, "{}", paint(style, &format!("{sign} {}", l.text)))?;
+    }
+    writeln!(w)?;
+    writeln!(w, "{}", paint(acc, "Summary"))?;
+    writeln!(
+        w,
+        "  {}",
+        paint(
+            faint,
+            &format!(
+                "+{}/-{} lines {SUB} +{}/-{} tokens {SUB} {label}",
+                d.added_lines, d.removed_lines, d.added_tokens, d.removed_tokens
+            )
+        )
+    )?;
+    Ok(())
+}
+
 /// One-shot renderer; holds the once-resolved stdout color mode.
 pub struct Renderer {
     mode: ColorMode,

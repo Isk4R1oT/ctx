@@ -1,0 +1,11 @@
+---
+source: tests/snapshots.rs
+expression: s
+---
+> diff step 0 -> 1
+  {
+    "system": "be terse",
+-   "messages": [ "first" ]
++   "messages": [ "first", "second" ]
+  }
+summary: +1/-1 lines, +12/-9 tokens (offline o200k approximation, ±10% (never calls an API))

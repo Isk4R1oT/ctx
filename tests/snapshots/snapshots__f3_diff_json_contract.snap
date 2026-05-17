@@ -1,0 +1,35 @@
+---
+source: tests/snapshots.rs
+expression: f3_diff()
+---
+{
+  "from": 0,
+  "to": 1,
+  "added_lines": 1,
+  "removed_lines": 1,
+  "retained_lines": 3,
+  "added_tokens": 12,
+  "removed_tokens": 9,
+  "lines": [
+    {
+      "op": "keep",
+      "text": "{"
+    },
+    {
+      "op": "keep",
+      "text": "  \"system\": \"be terse\","
+    },
+    {
+      "op": "remove",
+      "text": "  \"messages\": [ \"first\" ]"
+    },
+    {
+      "op": "add",
+      "text": "  \"messages\": [ \"first\", \"second\" ]"
+    },
+    {
+      "op": "keep",
+      "text": "}"
+    }
+  ]
+}

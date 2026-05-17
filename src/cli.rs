@@ -82,6 +82,20 @@ pub enum Cmd {
         #[arg(long)]
         tui: bool,
     },
+
+    /// F3 — per-step context diff (default: step N vs N-1).
+    Diff {
+        #[arg(value_name = "FILE")]
+        path: PathBuf,
+
+        /// Earlier step (default: `to - 1`).
+        #[arg(long)]
+        from: Option<usize>,
+
+        /// Later step (default: the last captured step).
+        #[arg(long)]
+        to: Option<usize>,
+    },
 }
 
 /// Parse the process arguments.
