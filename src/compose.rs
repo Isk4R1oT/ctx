@@ -503,6 +503,63 @@ mod tests {
     }
 
     #[test]
+    fn f1_must_not_be_blind_on_any_v1_provider_shape() {
+        // F1-FIX step D — durable class guard (DECISIONS.md D-007
+        // standing rule). F1 MUST decompose every v1 provider wire
+        // shape (PROJECT.md §4/§5: Anthropic + OpenAI-compatible),
+        // including the real-world null/omitted optional variants. A
+        // new provider/shape adds a row; this makes "F1 blind on a
+        // provider shape" a hard CI failure forever.
+        let cases: &[(&str, &[u8])] = &[
+            (
+                "anthropic: clean (system field + messages + tools)",
+                br#"{"model":"claude-3","system":"You are terse and exact.","messages":[{"role":"user","content":"a reasonably long question for the guard"}],"tools":[{"name":"s","input_schema":{"type":"object"}}]}"#,
+            ),
+            (
+                "anthropic: explicit null optionals (no tools turn)",
+                br#"{"model":"claude-3","system":"You are terse and exact.","messages":[{"role":"user","content":"a reasonably long question for the guard"}],"tools":null}"#,
+            ),
+            (
+                "openai: clean (system msg + history + tools[].function)",
+                br#"{"model":"gpt-4o","messages":[{"role":"system","content":"You are terse and exact."},{"role":"user","content":"a reasonably long question for the guard"}],"tools":[{"type":"function","function":{"name":"s","parameters":{"type":"object"}}}]}"#,
+            ),
+            (
+                "openai: real-client tools:null + tool_choice:null",
+                br#"{"model":"gpt-4o","messages":[{"role":"system","content":"You are terse and exact."},{"role":"user","content":"a reasonably long question for the guard"}],"tools":null,"tool_choice":null}"#,
+            ),
+            (
+                "openai: messages content arrays + assistant tool_calls",
+                br#"{"model":"gpt-4o","messages":[{"role":"system","content":[{"type":"text","text":"You are terse and exact."}]},{"role":"user","content":[{"type":"text","text":"a reasonably long question for the guard"}]},{"role":"assistant","content":null,"tool_calls":[{"id":"c","type":"function","function":{"name":"s","arguments":"{}"}}]}],"tools":[{"type":"function","function":{"name":"s","parameters":{"type":"object"}}}]}"#,
+            ),
+        ];
+        let mut blind = Vec::new();
+        for (name, body) in cases {
+            let mut t = Timeline::new();
+            // Path drives provider detection (F0 already classifies it;
+            // we do not re-derive — D-001 / brief §3-B).
+            let path = if name.starts_with("anthropic") {
+                "/v1/messages"
+            } else {
+                "/v1/chat/completions"
+            };
+            t.record_request("POST", path, &[], body);
+            let c = compose(&t, false);
+            let by = |l: &str| c.components.iter().find(|x| x.label == l).map(|x| x.tokens);
+            if c.focus_step.is_none()
+                || c.total_tokens == 0
+                || by("system").unwrap_or(0) == 0
+                || by("history").unwrap_or(0) == 0
+            {
+                blind.push(*name);
+            }
+        }
+        assert!(
+            blind.is_empty(),
+            "F1 is BLIND on v1 provider shape(s) {blind:?} — D-007 violated"
+        );
+    }
+
+    #[test]
     fn f1_not_blind_on_realworld_openai_tools_null() {
         // F1-FIX step A — the proven defect, as a real OpenAI body:
         // a no-tools chat.completions turn (real clients emit explicit

@@ -88,3 +88,32 @@
   C EXIT (no regression; review SHIP 0-high; harden 0-missed; all
   green via the loop) ✓ — committed atomically (B+C: the fix commit is
   the §2-gated unit; a separate empty C commit would be meaningless).
+
+## Step D — durable closure: D-007 + dual-provider F1 enforcement test
+
+- Change: `docs/DECISIONS.md` D-007 (root cause = Anthropic-only +
+  clean-only fixtures; the adapter fix; the binding standing rule
+  "every F1 test/fixture exercises BOTH v1 provider shapes incl.
+  null/omitted variants") + `compose::tests::
+  f1_must_not_be_blind_on_any_v1_provider_shape` (a 5-row table:
+  Anthropic clean, Anthropic tools:null, OpenAI clean, OpenAI
+  tools:null+tool_choice:null, OpenAI content-arrays+tool_calls;
+  asserts F1 never blind on any v1 shape).
+- Artifacts (real, this session):
+  - `rustcc digest --from check`: green (compiles, clippy clean).
+  - `cargo nextest`: **93/93** — the new enforcement test PASSES;
+    full suite green (F0/F1/F2/F3 zero-regression).
+  - `/rust-review` (`rust-reviewer`): **SHIP, 0 findings** — and it
+    *empirically proved the guard is load-bearing*: reverting the B/C
+    `adapter.rs` fix makes the enforcement test FAIL naming BOTH
+    regressed shapes (Anthropic null AND OpenAI null), so it durably
+    guards the whole D-007 class, not just the step-A case. Zero
+    production code changed (byte-proven; additions strictly inside
+    `#[cfg(test)] mod tests`).
+  - `/rust-harden`: `cargo mutants --in-diff` ⇒ **"No mutants to
+    filter"** — the step-D src delta is test-only; cargo-mutants never
+    mutates `#[cfg(test)]`, so there is genuinely no production logic
+    to mutate (vacuously 0-missed, recorded truthfully — the
+    production fix was already mutation-verified at B/C: 1 found / 1
+    caught / 0 missed). `cargo deny` ok; `cargo machete` clean.
+- D EXIT (D-007 written; enforcement test green; durable class guard) ✓.

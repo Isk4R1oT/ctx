@@ -178,3 +178,56 @@ on a pathological unbounded `ctx open` session the F0 `prompt_tokens` could wrap
 release / panic in debug exactly like the F1 site did. Tracked as a follow-up to apply
 the same `sat_sum` discipline to `timeline.rs` in a dedicated F0-maintenance change
 (its own rust-cc loop + re-harden), not folded silently into F1.
+
+---
+
+## D-007 — F1 dual-provider parse leniency; standing "both shapes" rule (2026-05-17)
+
+### Status: LOCKED. Closes the F1-FIX (F1-FIX-BRIEF). Does not relitigate D-001..D-006.
+
+**Defect (TDD-proven, not assumed).** F1 composition+waste printed
+`composition no captured prompt · 0 tokens · 0 findings` on an
+OpenAI-compatible body **despite a full F0 capture** (provider correctly
+`open_ai_compat`; `view`/`diff`/`open --json` all showed the bytes).
+Root cause: `AnthropicReq`/`OpenAiReq.messages|tools` used
+`#[serde(default)]`, which substitutes for a **missing** key but **not**
+an explicit `null`. Real OpenAI/agent clients emit `"tools": null` /
+`"messages": null` on a no-tool turn ⇒ `serde_json::from_slice` `Err`
+⇒ `adapter::parse` `Err` ⇒ `timeline::record_request` `.ok()` ⇒
+`assembled = None` ⇒ `compose` finds no focus ⇒ F1 blind. F0/F2/F3 use
+the verbatim `request.body`, so they were unaffected — F1 alone was
+silently broken on half the declared v1 surface (PROJECT.md §4/§5:
+Anthropic **+ OpenAI-compatible**).
+
+**Why CI missed it.** Every F1 fixture (compose unit tests + snapshots)
+was Anthropic-shape and used *clean* (omitted-key) bodies — the
+explicit-`null` real-client shape was never exercised on **either**
+provider.
+
+**Fix.** `adapter.rs`: `null_or_missing_as_default` serde helper
+(`Option::<T>::deserialize → unwrap_or_default`) applied with
+`#[serde(default, deserialize_with = …)]` to the four optional Vec
+fields of **both** provider request shapes. Pure parsing leniency:
+missing/`null` → empty; a present array is byte-identical; a
+structurally malformed body still returns `Error::Adapter` (verified).
+`compose.rs` is unchanged — it was already provider-agnostic over
+`step.assembled`; F1 stays PURE MEASUREMENT.
+
+**Brief-deviation, recorded (not silent).** F1-FIX-BRIEF §3-B said
+"fix `compose.rs`". The empirically-proven root cause is `adapter.rs`.
+Per the brief's own §1 ("on conflict, `PROJECT.md` is canonical") +
+D-001 (the provider-adapter trait is the single wire→canonical
+normalization layer) + §0 ("do NOT re-architect"), the minimal,
+non-duplicating, least-regression fix is in `adapter.rs`. Fixing
+`compose.rs` to re-parse would duplicate the adapter and violate D-001.
+
+### Standing rule (binding going forward)
+
+> **Every F1 test and fixture MUST exercise BOTH v1 provider wire
+> shapes** (Anthropic Messages *and* OpenAI-compatible
+> chat.completions), **including the real-world `null`/omitted optional
+> variants** — never Anthropic-only, never clean-only. Enforced by
+> `compose::tests::f1_must_not_be_blind_on_any_v1_provider_shape`
+> (a table over both providers × shape variants); a new provider shape
+> adds a row. This makes the "F1 blind on a provider shape" class a
+> hard CI failure forever.
