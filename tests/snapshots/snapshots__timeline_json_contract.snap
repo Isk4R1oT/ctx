@@ -1,0 +1,78 @@
+---
+source: tests/snapshots.rs
+expression: fixture()
+---
+{
+  "steps": [
+    {
+      "index": 0,
+      "provider": "anthropic",
+      "request": {
+        "method": "POST",
+        "path": "/v1/messages",
+        "headers": [
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "x-api-key",
+            "REDACTED"
+          ]
+        ],
+        "body": "{\"model\":\"claude-3\",\"system\":\"be terse\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"tools\":[{\"name\":\"search\",\"input_schema\":{\"type\":\"object\"}}]}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [],
+        "body": "{\"id\":\"msg_1\"}"
+      },
+      "assembled": {
+        "provider": "anthropic",
+        "model": "claude-3",
+        "system": "be terse",
+        "messages": [
+          {
+            "role": "user",
+            "text": "ping"
+          }
+        ],
+        "tools": [
+          {
+            "name": "search",
+            "schema_tokens": 6
+          }
+        ]
+      },
+      "prompt_tokens": 9
+    },
+    {
+      "index": 1,
+      "provider": "open_ai_compat",
+      "request": {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": [],
+        "body": "{\"model\":\"gpt-4o\",\"messages\":[{\"role\":\"system\",\"content\":\"sys\"},{\"role\":\"user\",\"content\":\"ping\"}]}"
+      },
+      "response": {
+        "status": 200,
+        "headers": [],
+        "body": "{\"id\":\"chatcmpl-1\"}"
+      },
+      "assembled": {
+        "provider": "open_ai_compat",
+        "model": "gpt-4o",
+        "system": "sys",
+        "messages": [
+          {
+            "role": "user",
+            "text": "ping"
+          }
+        ],
+        "tools": []
+      },
+      "prompt_tokens": 2
+    }
+  ]
+}

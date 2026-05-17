@@ -1,0 +1,26 @@
+---
+source: tests/snapshots.rs
+expression: SCHEMA
+---
+CREATE TABLE IF NOT EXISTS session (
+    id          INTEGER PRIMARY KEY,
+    created_at  TEXT NOT NULL,
+    ctx_version TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS step (
+    session_id    INTEGER NOT NULL REFERENCES session(id),
+    idx           INTEGER NOT NULL,
+    provider      TEXT,
+    req_method    TEXT NOT NULL,
+    req_path      TEXT NOT NULL,
+    status        INTEGER,
+    prompt_tokens INTEGER NOT NULL,
+    PRIMARY KEY (session_id, idx)
+);
+CREATE TABLE IF NOT EXISTS capture (
+    session_id INTEGER NOT NULL REFERENCES session(id),
+    idx        INTEGER NOT NULL,
+    kind       TEXT NOT NULL,
+    body       BLOB NOT NULL,
+    PRIMARY KEY (session_id, idx, kind)
+);
