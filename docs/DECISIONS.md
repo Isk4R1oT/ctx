@@ -116,3 +116,24 @@ project status (`../../CLAUDE.md`: "Status: design only. ZERO code written … N
 = implementation"). The binding intent for this session is the detailed F0 EXIT
 criteria: execute R→F0 via the rust-cc compiler-truth loop to **real** `cargo`-green.
 All other HARD INVARIANTS remain in force unchanged. No contradiction remains open.
+
+---
+
+## D-004 — F0 honest disclosed limit: response is buffered, not streamed (2026-05-17)
+
+### Status: DISCLOSED (intellectual honesty is the signal — no overclaiming).
+
+The F0 proxy captures the **request** (the assembled wire prompt) byte-for-byte — this
+is the F0 EXIT criterion and is proven by `tests/wire_capture.rs` for both providers.
+The **upstream response** is currently *buffered in full* before being returned to the
+child, not streamed-through chunk-by-chunk. Consequences, stated plainly:
+
+- A real agent using `stream=true` SSE will receive the full body at once rather than
+  incrementally. Request capture (the F0 deliverable) is unaffected and exact.
+- This is a deliberate F0 scope cut for correctness/convergence, **not** a hidden
+  defect. SSE pass-through with a streaming tee is a tracked **v1.x** item
+  (`docs/PROJECT.md` §6 v1.x / §8 renderer-agnostic seams), not an F0 claim.
+
+Rationale: PROJECT.md §6 lists F1/F2/F3 as the views on F0; streaming fidelity is an
+orthogonal transport concern. Claiming streaming now would be the kind of overclaim the
+project explicitly rejects ("knowing what NOT to build, with proof, is the signal").

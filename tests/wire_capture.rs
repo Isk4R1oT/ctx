@@ -4,7 +4,7 @@
 //! The "agent" here is plain `curl` — deliberately. `ctx` reads the
 //! wire, so a raw HTTP client is the strongest possible proof of zero
 //! SDK/framework coupling (the moat, `docs/PROJECT.md` §3). Two
-//! `wiremock` servers stand in for the real Anthropic / OpenAI
+//! `wiremock` servers stand in for the real Anthropic / `OpenAI`
 //! upstreams; `CTX_UPSTREAM_*` points `ctx` at them (no network, no
 //! keys, hermetic).
 
