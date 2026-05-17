@@ -7,21 +7,7 @@
 //! separately by the timeline; this is the *structured view*.
 
 use serde::{Deserialize, Serialize};
-
-/// Accept a missing key, an explicit `null`, OR the value — all mapped
-/// to `T::default()` for the first two. `#[serde(default)]` alone only
-/// covers the *missing* case; real OpenAI/agent clients send explicit
-/// `"tools": null` / `"messages": null` on a no-op turn, which would
-/// otherwise fail the whole parse and blind F1 (the wire is lenient by
-/// contract — `docs/PROJECT.md` §3/§8; D-001). Pure parsing leniency,
-/// no semantics added.
-fn null_or_missing_as_default<'de, D, T>(d: D) -> Result<T, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de> + Default,
-{
-    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
-}
+use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -74,76 +60,38 @@ pub struct Assembled {
     pub tools: Vec<WireTool>,
 }
 
-// --- Lenient wire shapes (only the fields we read) --------------------
-
-#[derive(Debug, Deserialize)]
-struct AnthropicReq {
-    model: Option<String>,
-    #[serde(default)]
-    system: serde_json::Value,
-    #[serde(default, deserialize_with = "null_or_missing_as_default")]
-    messages: Vec<RawMessage>,
-    #[serde(default, deserialize_with = "null_or_missing_as_default")]
-    tools: Vec<AnthropicTool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AnthropicTool {
-    name: String,
-    #[serde(default)]
-    input_schema: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiReq {
-    model: Option<String>,
-    #[serde(default, deserialize_with = "null_or_missing_as_default")]
-    messages: Vec<RawMessage>,
-    #[serde(default, deserialize_with = "null_or_missing_as_default")]
-    tools: Vec<OpenAiTool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiTool {
-    #[serde(default)]
-    function: OpenAiFn,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct OpenAiFn {
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    parameters: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawMessage {
-    #[serde(default)]
-    role: String,
-    #[serde(default)]
-    content: serde_json::Value,
-}
+// --- Defensive wire extraction ----------------------------------------
+//
+// We parse to `serde_json::Value` and walk it, never into rigid typed
+// structs. Real OpenAI/agent clients send shapes a `#[derive]` struct
+// rejects (a tool without `function`, `tools: null`, a non-string field
+// somewhere, …) — that made `from_slice::<TypedReq>` return `Err`,
+// which `record_request().ok()` swallowed, blinding F1 while F0/F2/F3
+// (raw bytes) kept working. A `Value` walk **cannot fail on any valid
+// JSON**: every field is read defensively (missing/null/wrong-type ⇒
+// that field is simply absent). This closes the whole "real client
+// shape breaks F1" class by construction (D-008). Pure extraction —
+// no scoring/judgment (F1 stays pure measurement; evalint KILLED).
 
 /// Flatten provider content (string, or array of typed blocks) to text,
 /// without losing characters that matter for the verbatim view.
-fn flatten_content(v: &serde_json::Value) -> String {
+fn flatten_content(v: &Value) -> String {
     match v {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Array(items) => items
+        Value::String(s) => s.clone(),
+        Value::Array(items) => items
             .iter()
             .map(|it| {
                 it.get("text")
-                    .and_then(serde_json::Value::as_str)
+                    .and_then(Value::as_str)
                     .map_or_else(|| it.to_string(), ToOwned::to_owned)
             })
             .collect::<String>(),
-        serde_json::Value::Null => String::new(),
+        Value::Null => String::new(),
         other => other.to_string(),
     }
 }
 
-fn tool_tokens(schema: &serde_json::Value, name: &str) -> usize {
+fn tool_tokens(schema: &Value, name: &str) -> usize {
     let body = if schema.is_null() {
         String::new()
     } else {
@@ -152,71 +100,111 @@ fn tool_tokens(schema: &serde_json::Value, name: &str) -> usize {
     crate::tokenizer::count(name) + crate::tokenizer::count(&body)
 }
 
+fn messages_of(v: &Value) -> &[Value] {
+    v.get("messages")
+        .and_then(Value::as_array)
+        .map_or(&[], |a| a.as_slice())
+}
+
+fn tools_of(v: &Value) -> &[Value] {
+    v.get("tools")
+        .and_then(Value::as_array)
+        .map_or(&[], |a| a.as_slice())
+}
+
+fn role_of(m: &Value) -> String {
+    m.get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn content_text(m: &Value) -> String {
+    flatten_content(m.get("content").unwrap_or(&Value::Null))
+}
+
 /// Parse a captured request body into the canonical `Assembled` view.
 ///
+/// Defensive: succeeds for **any valid JSON** (the verbatim bytes are
+/// kept separately by the timeline — this is the lenient *structured*
+/// view, `docs/PROJECT.md` §3/§8; D-001/D-008).
+///
 /// # Errors
-/// Returns [`crate::Error::Adapter`] if the body is not valid JSON for
-/// the detected provider shape.
+/// [`crate::Error::Adapter`] only if `body` is not valid JSON at all.
 pub fn parse(provider: Provider, body: &[u8]) -> crate::Result<Assembled> {
+    let v: Value = serde_json::from_slice(body)
+        .map_err(|e| crate::Error::Adapter(format!("{provider:?} body not JSON: {e}")))?;
+    let model = v
+        .get("model")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+
     match provider {
         Provider::Anthropic => {
-            let r: AnthropicReq = serde_json::from_slice(body)
-                .map_err(|e| crate::Error::Adapter(format!("anthropic body: {e}")))?;
-            let system = match &r.system {
-                serde_json::Value::Null => None,
-                other => Some(flatten_content(other)),
+            let system = match v.get("system") {
+                None | Some(Value::Null) => None,
+                Some(other) => Some(flatten_content(other)),
             };
+            let messages = messages_of(&v)
+                .iter()
+                .map(|m| WireMessage {
+                    role: role_of(m),
+                    text: content_text(m),
+                })
+                .collect();
+            let tools = tools_of(&v)
+                .iter()
+                .filter_map(|t| {
+                    let name = t.get("name").and_then(Value::as_str)?;
+                    Some(WireTool {
+                        name: name.to_string(),
+                        schema_tokens: tool_tokens(
+                            t.get("input_schema").unwrap_or(&Value::Null),
+                            name,
+                        ),
+                    })
+                })
+                .collect();
             Ok(Assembled {
                 provider,
-                model: r.model,
+                model,
                 system,
-                messages: r
-                    .messages
-                    .iter()
-                    .map(|m| WireMessage {
-                        role: m.role.clone(),
-                        text: flatten_content(&m.content),
-                    })
-                    .collect(),
-                tools: r
-                    .tools
-                    .iter()
-                    .map(|t| WireTool {
-                        name: t.name.clone(),
-                        schema_tokens: tool_tokens(&t.input_schema, &t.name),
-                    })
-                    .collect(),
+                messages,
+                tools,
             })
         }
         Provider::OpenAiCompat => {
-            let r: OpenAiReq = serde_json::from_slice(body)
-                .map_err(|e| crate::Error::Adapter(format!("openai body: {e}")))?;
             let mut system = None;
             let mut messages = Vec::new();
-            for m in &r.messages {
-                let text = flatten_content(&m.content);
-                if m.role == "system" && system.is_none() {
+            for m in messages_of(&v) {
+                let role = role_of(m);
+                let text = content_text(m);
+                if role == "system" && system.is_none() {
                     system = Some(text);
                 } else {
-                    messages.push(WireMessage {
-                        role: m.role.clone(),
-                        text,
-                    });
+                    messages.push(WireMessage { role, text });
                 }
             }
+            let tools = tools_of(&v)
+                .iter()
+                .filter_map(|t| {
+                    let f = t.get("function")?;
+                    let name = f.get("name").and_then(Value::as_str)?;
+                    Some(WireTool {
+                        name: name.to_string(),
+                        schema_tokens: tool_tokens(
+                            f.get("parameters").unwrap_or(&Value::Null),
+                            name,
+                        ),
+                    })
+                })
+                .collect();
             Ok(Assembled {
                 provider,
-                model: r.model,
+                model,
                 system,
                 messages,
-                tools: r
-                    .tools
-                    .iter()
-                    .map(|t| WireTool {
-                        name: t.function.name.clone(),
-                        schema_tokens: tool_tokens(&t.function.parameters, &t.function.name),
-                    })
-                    .collect(),
+                tools,
             })
         }
     }

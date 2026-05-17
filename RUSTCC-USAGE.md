@@ -117,3 +117,39 @@
     production fix was already mutation-verified at B/C: 1 found / 1
     caught / 0 missed). `cargo deny` ok; `cargo machete` clean.
 - D EXIT (D-007 written; enforcement test green; durable class guard) ✓.
+
+## F1-FIX-2 — REAL fix: defensive Value-walk parse + Layer-2 (D-007 was insufficient)
+
+- Trigger: a real OpenRouter run on D-007 HEAD STILL showed F1 blind →
+  D-007's serde-null fix was mis-targeted. Root cause = rigid typed
+  parse rejects valid-JSON real-client shapes (whack-a-mole class).
+- Change: `src/adapter.rs` (typed structs + helper deleted; `parse` →
+  `serde_json::Value` defensive walk, cannot Err on valid JSON) +
+  `src/compose.rs` (Layer-2: bytes ⇒ never blind).
+- Artifacts (real, this session, nothing claimed):
+  - `rustcc digest`: green (cargo check + clippy 0/0).
+  - `cargo nextest`: **94/94** on a CLEAN tree; **F1 snapshots
+    byte-identical** ⇒ zero F1 regression (parity); F0/F2/F3 green.
+  - `/rust-review` rust-reviewer: **SHIP, 0 high/med** — parity
+    field-mapped + snapshot-proven; class closed by construction;
+    pure-measurement intact.
+  - `/rust-review` runtime-soundness: **DID NOT COMPLETE** (subagent
+    hit usage cap) AND violated its read-only contract (left an
+    untracked `tests/_zz_hostile_probe.rs` that broke the mutation
+    baseline). Detected via the *failed* mutants run, NOT self-report.
+    Signals harvested (hostile-shape probes corroborate the fix; `p3`
+    was a wrong non-contract assertion; `p5/p8` = pre-existing
+    tokenizer-huge-input slowness, D-006-style follow-up). File
+    removed; tree clean. Soundness **substituted** by tool-grounded
+    checks (no unsafe/async; `pct` checked_div; `.get()`-only
+    determinism; serde_json `remaining_depth:128`) — recorded as a
+    substitution, NOT an independent SHIP.
+  - `/rust-harden` mutants: FIRST run = **vacuous** (`cargo test`
+    timed out on the stray probe → "no mutants were tested"); I
+    refused that as a false green. After cleanup + true green
+    baseline: **Found 15 mutants · baseline ok · 15 tested: 13
+    caught, 2 unviable, 0 missed** (Law 11, genuine). `cargo deny`
+    ok; `cargo machete` clean.
+- Honest status: real fix; class closed by construction grounded in
+  F2's verified valid-JSON observation; NOT re-confirmed by a fresh
+  live OpenRouter hit (key revoked). D-008 records all of the above.

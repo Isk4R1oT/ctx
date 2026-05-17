@@ -118,6 +118,7 @@ pub fn compose(timeline: &Timeline, deep: bool) -> Composition {
     let mut components = Vec::new();
     let mut tools_deep = Vec::new();
     let mut total = 0usize;
+    let mut focus_step = focus.map(|s| s.index);
 
     if let Some(step) = focus {
         if let Some(a) = &step.assembled {
@@ -152,10 +153,29 @@ pub fn compose(timeline: &Timeline, deep: bool) -> Composition {
                 }
             }
         }
+    } else if let Some(step) = timeline
+        .steps
+        .iter()
+        .rev()
+        .find(|s| !s.request.body.is_empty())
+    {
+        // Layer 2 — graceful degradation: a body was captured but no
+        // step parsed structurally (e.g. a non-JSON / compressed wire
+        // body). F1 must NEVER be blind when bytes exist ("you cannot
+        // debug what you cannot see"): count the verbatim body and say
+        // *why* the structured view is unavailable. Pure measurement
+        // (a token count + a factual label) — no judgment.
+        total = crate::tokenizer::count(&step.request.body);
+        components.push(Component {
+            label: "raw-body (structured parse failed; counted verbatim)".to_string(),
+            tokens: total,
+            pct: pct(total, total),
+        });
+        focus_step = Some(step.index);
     }
 
     Composition {
-        focus_step: focus.map(|s| s.index),
+        focus_step,
         total_tokens: total,
         components,
         tools_deep,
@@ -500,6 +520,30 @@ mod tests {
             br#"{"choices":[{"message":{"role":"assistant","content":"done"}}]}"#,
         );
         t
+    }
+
+    #[test]
+    fn f1_degrades_visibly_not_blind_on_non_json_capture() {
+        // Layer 2 (D-008): a captured body that is NOT valid JSON (e.g.
+        // a compressed/binary wire body) must NOT make F1 say
+        // "no captured prompt · 0 tokens". Bytes exist ⇒ F1 counts them
+        // verbatim and surfaces *why* the structured view is missing.
+        let mut t = Timeline::new();
+        t.record_request(
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            b"\x1f\x8b\x08 not json at all -- gzip/binary-ish wire body",
+        );
+        let c = compose(&t, false);
+        assert!(c.focus_step.is_some(), "must not be blind when bytes exist");
+        assert!(c.total_tokens > 0, "must count the verbatim body");
+        assert_eq!(c.components.len(), 1);
+        assert!(
+            c.components[0].label.contains("structured parse failed"),
+            "must visibly state why the structured view is unavailable: {}",
+            c.components[0].label
+        );
     }
 
     #[test]

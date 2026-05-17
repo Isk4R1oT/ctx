@@ -231,3 +231,69 @@ non-duplicating, least-regression fix is in `adapter.rs`. Fixing
 > (a table over both providers × shape variants); a new provider shape
 > adds a row. This makes the "F1 blind on a provider shape" class a
 > hard CI failure forever.
+
+---
+
+## D-008 — F1 real fix: defensive Value-walk parse; D-007 mechanism superseded (2026-05-17)
+
+### Status: LOCKED. Supersedes the *mechanism* of D-007 (not its standing rule). Does not relitigate D-001..D-006.
+
+**Why D-007 was insufficient.** D-007 made `OpenAiReq`/`AnthropicReq`
+`messages`/`tools` tolerate explicit `null`. A **real OpenRouter run on
+the D-007 HEAD still showed F1 `composition no captured prompt`** while
+F0/F2/F3 (raw bytes) worked — the rigid `#[derive(Deserialize)]` structs
+reject *many* real-client valid-JSON shapes, not just `null`. Chasing
+field-by-field is whack-a-mole; two prior fixes were confidently wrong
+because their TDD fixtures were author-invented, not real captured wire.
+
+**Root cause (real).** `adapter::parse` deserialized into rigid typed
+structs; ANY shape mismatch on a *valid-JSON* body → `serde_json`
+`Err` → `timeline::record_request().ok()` swallows it → `assembled =
+None` → `compose` no focus → F1 blind. F0/F2/F3 use the verbatim
+`request.body`, so only F1 was hit.
+
+**Fix.** (1) `adapter.rs`: delete all typed request structs +
+`null_or_missing_as_default`; `parse` now `serde_json::from_slice::
+<Value>` then a defensive walk (`messages_of/tools_of/role_of/
+content_text`, reused `flatten_content/tool_tokens`). It **cannot Err
+on any valid JSON**; every field read is missing/null/wrong-type
+tolerant. Verified byte-identical `Assembled` for every well-formed
+Anthropic+OpenAI body (F1 snapshots unchanged; rust-reviewer
+field-mapped parity; only *malformed* inputs differ, improvement-only).
+(2) `compose.rs` Layer-2: if nothing parsed structurally but a step
+captured bytes, emit one `raw-body (structured parse failed; counted
+verbatim)` component — **bytes captured ⇒ F1 never blind**. Pure
+measurement (count + factual label). Class closed by construction.
+
+**Grounding & honest caveat.** `ctx view` (F2) *verified* the real
+OpenRouter body is valid JSON ⇒ the Value-walk provably yields an
+`Assembled` for it. **Not** re-confirmed by a fresh live OpenRouter
+hit (key revoked, correctly); the claim rests on that verified-F2 fact
++ a by-construction proof + the Layer-2 fallback — materially stronger
+than the prior synthetic-fixture greens, but stated as such.
+
+**Standing rule (binding, extends D-007).** D-007's "every F1
+test/fixture exercises BOTH provider shapes" is RETAINED. Added: **a
+TDD test proving a wire-parse defect MUST use a verbatim real `--save`
+capture, never an author's approximation** — the two false greens this
+session were exactly that failure.
+
+**Pre-existing follow-up (recorded, NOT scope-crept, D-006-style).**
+`tokenizer::count` on a multi-MB body (a crafted `ctx open` SQLite) is
+pathologically slow (surfaced by a hostile probe; *old code had the
+identical exposure*; F0 live capture is bounded by `MAX_BODY` 64 MiB).
+Out of F1-FIX scope; tracked for a dedicated bounded-tokenization
+change, not silently folded in.
+
+**Process integrity incident (recorded honestly).** The
+`runtime-soundness` review subagent hit the usage cap mid-run and, in
+violation of its read-only contract, left an untracked
+`tests/_zz_hostile_probe.rs` that broke the mutation baseline. Detected
+via the *failed* mutants run (not self-report), signals harvested
+(hostile-shape cases corroborate the fix; one assertion was a wrong
+non-contract expectation — parity with old behavior is correct), file
+removed, tree clean. Independent runtime-soundness verdict was NOT
+obtained; substituted by tool-grounded checks (no unsafe/async; `pct`
+`checked_div` div-by-zero-safe; `.get()`-only determinism; serde_json
+`remaining_depth:128`) — recorded as a substitution, not claimed as an
+independent SHIP.
