@@ -90,6 +90,74 @@ async fn captures_verbatim_wire_prompt_for_both_providers() {
 }
 
 #[tokio::test]
+async fn save_then_open_roundtrips_through_the_binary() {
+    let anthropic = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"a"})))
+        .mount(&anthropic)
+        .await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("session.sqlite");
+    let script = format!(
+        "curl -s -o /dev/null -X POST \"$ANTHROPIC_BASE_URL/v1/messages\" \
+            -H 'content-type: application/json' -d '{ANTHROPIC_BODY}'"
+    );
+
+    let run = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .args([
+            "run",
+            "--save",
+            db.to_str().unwrap(),
+            "--",
+            "sh",
+            "-c",
+            &script,
+        ])
+        .env("CTX_UPSTREAM_ANTHROPIC", anthropic.uri())
+        .env("NO_COLOR", "1")
+        .output()
+        .await
+        .expect("spawn ctx run --save");
+    assert!(run.status.success());
+    assert!(db.exists(), "--save must write the opt-in SQLite file");
+
+    let open = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .args(["--json", "open", db.to_str().unwrap()])
+        .env("NO_COLOR", "1")
+        .output()
+        .await
+        .expect("spawn ctx open");
+    assert!(open.status.success());
+
+    let tl: Value = serde_json::from_slice(&open.stdout).expect("ctx open --json valid JSON");
+    let steps = tl["steps"].as_array().expect("steps");
+    assert_eq!(steps.len(), 1);
+    assert_eq!(
+        steps[0]["request"]["body"].as_str().unwrap(),
+        ANTHROPIC_BODY
+    );
+    assert_eq!(steps[0]["provider"], "anthropic");
+}
+
+#[tokio::test]
+async fn bare_invocation_renders_the_banner() {
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .arg("--color")
+        .arg("always")
+        .output()
+        .await
+        .expect("spawn ctx");
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("ctx"), "banner names the tool");
+    assert!(s.contains("ctx run -- "), "banner shows the primary verb");
+    // Strongest family rule: no emoji, ever.
+    assert!(!s.chars().any(|c| c as u32 >= 0x1_F000));
+}
+
+#[tokio::test]
 async fn run_requires_a_child_command() {
     let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
         .args(["run"])

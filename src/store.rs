@@ -197,6 +197,43 @@ mod tests {
     }
 
     #[test]
+    fn load_roundtrips_a_saved_session() {
+        let mut t = Timeline::new();
+        let i = t.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"s","messages":[{"role":"user","content":"hi"}]}"#,
+        );
+        t.record_response(i, 201, &[], b"{\"id\":\"x\"}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("s.sqlite");
+        persist(&t, &Sink::Sqlite(db.clone())).unwrap();
+
+        let back = load(&db).unwrap();
+        assert_eq!(back.steps.len(), 1);
+        let s = &back.steps[0];
+        assert_eq!(s.request.method, "POST");
+        assert_eq!(s.request.path, "/v1/messages");
+        assert_eq!(s.request.body, t.steps[0].request.body);
+        assert_eq!(s.provider, Some(crate::adapter::Provider::Anthropic));
+        assert_eq!(s.response.as_ref().unwrap().status, 201);
+        assert_eq!(s.prompt_tokens, t.steps[0].prompt_tokens);
+    }
+
+    #[test]
+    fn load_missing_session_is_persistence_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty.sqlite");
+        Connection::open(&empty)
+            .unwrap()
+            .execute_batch(SCHEMA)
+            .unwrap();
+        assert!(matches!(load(&empty), Err(crate::Error::Persistence(_))));
+    }
+
+    #[test]
     fn schema_is_stable_contract() {
         // Guards the on-disk contract; the full text is snapshot-tested
         // in tests/snapshots.
