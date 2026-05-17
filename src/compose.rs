@@ -468,6 +468,102 @@ mod tests {
         assert!(calc_tokens > search_tokens, "fixture must be asymmetric");
     }
 
+    // F1-FIX step A: the exact OpenAI `chat.completions` parallel of
+    // `tl()` — system as messages[0]{role:system}, user/assistant
+    // history, tools[] as {"type":"function","function":{...}}, an
+    // OpenAI tool_calls response. NOT rigged: same provider-agnostic
+    // assertions as the Anthropic F1 tests.
+    fn openai_tl() -> Timeline {
+        let mut t = Timeline::new();
+        let i = t.record_request(
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            br#"{"model":"openai/gpt-4o","messages":[{"role":"system","content":"You are a careful assistant. Always be terse and exact."},{"role":"user","content":"the first user question, which is reasonably long here"}],"tools":[{"type":"function","function":{"name":"search","description":"web","parameters":{"type":"object"}}},{"type":"function","function":{"name":"calc","description":"math","parameters":{"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"},"op":{"type":"string"}},"required":["a","b","op"]}}}],"stream":true}"#,
+        );
+        t.record_response(
+            i,
+            200,
+            &[],
+            br#"{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"search","arguments":"{}"}}]}}]}"#,
+        );
+        let j = t.record_request(
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            br#"{"model":"openai/gpt-4o","messages":[{"role":"system","content":"You are a careful assistant. Always be terse and exact."},{"role":"user","content":"the first user question, which is reasonably long here"},{"role":"assistant","content":"a tool result block here"},{"role":"user","content":"the first user question, which is reasonably long here"}],"tools":[{"type":"function","function":{"name":"search","description":"web","parameters":{"type":"object"}}},{"type":"function","function":{"name":"calc","description":"math","parameters":{"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"},"op":{"type":"string"}},"required":["a","b","op"]}}}],"stream":true}"#,
+        );
+        t.record_response(
+            j,
+            200,
+            &[],
+            br#"{"choices":[{"message":{"role":"assistant","content":"done"}}]}"#,
+        );
+        t
+    }
+
+    #[test]
+    fn f1_not_blind_on_realworld_openai_tools_null() {
+        // F1-FIX step A — the proven defect, as a real OpenAI body:
+        // a no-tools chat.completions turn (real clients emit explicit
+        // `"tools": null`, not an omitted key). On HEAD `adapter::parse`
+        // errors (serde `default` ≠ null) ⇒ assembled None ⇒ F1 prints
+        // "composition no captured prompt" though F0/F2/F3 see the bytes.
+        // MUST fail pre-fix, pass post-fix. Not rigged: this is exactly
+        // what e.g. the OpenAI SDK / agent frameworks send on a no-tool
+        // call, and PROJECT.md §4/§5 declares OpenAI-compatible a v1
+        // provider.
+        let mut t = Timeline::new();
+        t.record_request(
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            br#"{"model":"openai/gpt-4o","messages":[{"role":"system","content":"You are terse."},{"role":"user","content":"a reasonably long user question for the fixture"}],"tools":null,"tool_choice":null}"#,
+        );
+        let c = compose(&t, false);
+        assert!(
+            c.focus_step.is_some(),
+            "F1 blind on a real OpenAI tools:null body (focus None)"
+        );
+        assert!(
+            c.total_tokens > 0,
+            "F1 reports 0 tokens on a real OpenAI tools:null capture"
+        );
+        // system + user history must decompose (no tools this turn ⇒
+        // tool-schemas legitimately 0; system & history are not).
+        let by = |l: &str| c.components.iter().find(|x| x.label == l).map(|x| x.tokens);
+        assert!(by("system").unwrap_or(0) > 0, "system must decompose");
+        assert!(by("history").unwrap_or(0) > 0, "history must decompose");
+    }
+
+    #[test]
+    fn f1_decomposes_openai_chat_completions_shape() {
+        // The flagship headline MUST work on the OpenAI-compatible wire
+        // shape (PROJECT.md §4/§5: v1 = Anthropic + OpenAI-compatible),
+        // identically to the Anthropic shape — same categories, non-zero
+        // tokens, same indictments.
+        let c = compose(&openai_tl(), true);
+        assert_eq!(c.focus_step, Some(1), "OpenAI step must be the focus");
+        let labels: Vec<&str> = c.components.iter().map(|x| x.label.as_str()).collect();
+        assert_eq!(labels, ["system", "tool-schemas", "history"]);
+        assert!(c.total_tokens > 0, "OpenAI prompt must not be 0 tokens");
+        for comp in &c.components {
+            assert!(
+                comp.tokens > 0,
+                "component `{}` must be non-zero on the OpenAI shape",
+                comp.label
+            );
+        }
+        assert_eq!(c.tools_deep.len(), 2, "both OpenAI tools attributed");
+        let codes: BTreeSet<&str> = c.indictments.iter().map(|i| i.code.as_str()).collect();
+        assert!(codes.contains("unused-loaded-tools"), "calc never called");
+        assert!(codes.contains("duplicate-block"));
+        assert!(codes.contains("repeated-block-across-turns"));
+        assert!(codes.contains("unpruned-history"));
+        assert!(codes.contains("preamble-repay"));
+        assert!(codes.len() >= 4, "need >=4 indictments, got {codes:?}");
+    }
+
     fn step_with(system: &str, n_msgs: usize, tools: &str) -> Vec<u8> {
         let msgs: Vec<String> = (0..n_msgs)
             .map(|k| format!(r#"{{"role":"user","content":"message number {k} of this turn"}}"#))

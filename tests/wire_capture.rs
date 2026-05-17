@@ -232,6 +232,92 @@ async fn f2_view_is_byte_exact_vs_captured_wire_bytes() {
 }
 
 #[tokio::test]
+async fn f1_headline_works_on_a_real_openai_chat_completions_run() {
+    // F1-FIX step A (integration repro, the layer the defect was proven
+    // on): a real `ctx run` whose child posts an OpenAI-compatible
+    // chat.completions body. F0 captures it (provider open_ai_compat);
+    // the F1 headline MUST decompose it, not print "no captured prompt".
+    let openai = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}]
+        })))
+        .mount(&openai)
+        .await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("oai.sqlite");
+    // A realistic OpenAI body: system + user + assistant history +
+    // tools[] (function shape) + the usual extra fields a real client
+    // sends. Single-quoted in sh, so no embedded single quotes.
+    let body = r#"{"model":"openai/gpt-4o","messages":[{"role":"system","content":"You are terse."},{"role":"user","content":"the first question that is reasonably long here"},{"role":"assistant","content":"a prior assistant turn of some length"},{"role":"user","content":"the first question that is reasonably long here"}],"tools":[{"type":"function","function":{"name":"search","description":"web","parameters":{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}}},{"type":"function","function":{"name":"calc","description":"math","parameters":{"type":"object"}}}],"temperature":0.2,"stream":true}"#;
+    let script = format!(
+        "curl -s -o /dev/null -X POST \"$OPENAI_BASE_URL/chat/completions\" \
+            -H 'content-type: application/json' -H 'authorization: Bearer sk-x' -d '{body}'; \
+         curl -s -o /dev/null -X POST \"$OPENAI_BASE_URL/chat/completions\" \
+            -H 'content-type: application/json' -H 'authorization: Bearer sk-x' -d '{body}'"
+    );
+    let run = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .args([
+            "run",
+            "--save",
+            db.to_str().unwrap(),
+            "--",
+            "sh",
+            "-c",
+            &script,
+        ])
+        .env("CTX_UPSTREAM_OPENAI", openai.uri())
+        .env("NO_COLOR", "1")
+        .output()
+        .await
+        .expect("spawn ctx run");
+    assert!(run.status.success());
+
+    // F1 headline JSON (D-005 RunReport): composition must be populated.
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .args(["--json", "open", db.to_str().unwrap()])
+        .env("NO_COLOR", "1")
+        .output()
+        .await
+        .expect("spawn ctx open --json");
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(
+        v["steps"][0]["provider"], "open_ai_compat",
+        "F0 classified it"
+    );
+    let comp = &v["composition"];
+    assert!(
+        !comp["focus_step"].is_null(),
+        "F1 must find a focus step on the OpenAI shape, got composition={comp}"
+    );
+    assert!(
+        comp["total_tokens"].as_u64().unwrap() > 0,
+        "F1 must not report 0 tokens on a real OpenAI capture, got {comp}"
+    );
+
+    // F1 headline plain text must NOT say "no captured prompt".
+    let plain = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .args(["open", db.to_str().unwrap()])
+        .env("NO_COLOR", "1")
+        .output()
+        .await
+        .expect("spawn ctx open");
+    let s = String::from_utf8_lossy(&plain.stdout);
+    assert!(
+        !s.contains("no captured prompt"),
+        "F1 headline is blind on the OpenAI shape: {s}"
+    );
+    assert!(s.contains("component system "), "system component present");
+    assert!(
+        s.contains("component tool-schemas "),
+        "tool-schemas present"
+    );
+}
+
+#[tokio::test]
 async fn f3_diff_is_correct_on_a_real_multi_step_run() {
     // F3 EXIT: a real 2-step run; `ctx diff` reports the added lines
     // and the positive token delta of the grown second prompt.
