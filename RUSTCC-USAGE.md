@@ -183,3 +183,30 @@
   F0 capture/persistence path). Surfaced to the user for the
   scope/one-way-door decision BEFORE step B/C. No code, no fixture,
   no green claimed.
+
+---
+
+## F1-FIX3 — step B (failing test on a VERBATIM REAL gzip capture; commit-gate green)
+
+- **Real fixture (NOT synthetic, brief §1):**
+  `tests/fixtures/real_openai_gzip_request.bin` = 446 bytes, the exact
+  wire bytes a real httpx OpenAI-shaped client put on the wire with
+  `Content-Encoding: gzip`, recorded by a real listener. Magic `1F 8B
+  08 00` (UNMANGLED) — vs the ctx-saved copy `1F EFBFBD 08` (already
+  destroyed by the bug). Decompresses to 965 B valid JSON
+  (system+user+assistant+user, tools lookup_complexity/run_benchmark).
+- **rust-cc loop artifact:** Edit on `src/compose.rs` → PostToolUse
+  `rustcc` digest clean; `just check` (`cargo clippy --all-targets
+  --all-features -D warnings`) = **Finished, 0 warnings**.
+- **Defect PROVEN on the real body (pre-fix, f866dac):**
+  `cargo nextest run --run-ignored only -E test(f1_decomposes_real_
+  gzip_openai_capture)` → **FAIL**:
+  `F1 fell back to Layer-2 raw-body on a real gzip capture:
+  [Component { label: "raw-body (structured parse failed; counted
+  verbatim)", tokens: 342, pct: 100 }]` (src/compose.rs:707). Exact
+  §0 symptom, through the real `record_request`→`compose` path.
+- **Existing suite green (commit-gate honored):** `just test` →
+  `94 tests run: 94 passed, 1 skipped` + doctests ok. The new test is
+  `#[ignore]`d (reason string documents why) so the gate is NOT
+  bypassed; the pre-fix failure is demonstrated above, un-ignored in
+  step C. No `--no-verify`, no `RUSTCC_GATES=off`.

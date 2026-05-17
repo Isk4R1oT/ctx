@@ -665,6 +665,71 @@ mod tests {
         assert!(codes.len() >= 4, "need >=4 indictments, got {codes:?}");
     }
 
+    // F1-FIX3 step B — the defect proven on a VERBATIM REAL capture.
+    // `tests/fixtures/real_openai_gzip_request.bin` is the exact bytes a
+    // real httpx OpenAI-shaped client (system + user/assistant history +
+    // tools[]) put on the wire with `Content-Encoding: gzip`, recorded by
+    // a real listener — NOT hand-authored, and NOT the ctx-saved copy
+    // (that copy is already destroyed by the very bug under test:
+    // `timeline::record_request`'s `String::from_utf8_lossy` mangles the
+    // compressed body before parse/persist, so D-007/D-008's parser fixes
+    // never see real bytes). MUST fail on `f866dac`, pass after step C.
+    // `#[ignore]` keeps the commit-gate green at step B; the pre-fix
+    // failure is demonstrated and recorded in RUSTCC-USAGE.md, the test
+    // is un-ignored in step C (D-009).
+    #[test]
+    #[ignore = "F1-FIX3 step B: fails on f866dac (compressed body mangled at the F0 capture boundary); un-ignored + fixed in step C / D-009"]
+    fn f1_decomposes_real_gzip_openai_capture() {
+        let gz = include_bytes!("../tests/fixtures/real_openai_gzip_request.bin");
+        // Guard: the fixture must really be gzip — a future regen that
+        // silently produced plain JSON would make this test vacuously
+        // pass and re-hide the defect (brief §1: no assertion-weakening).
+        assert_eq!(
+            &gz[..2],
+            &[0x1f, 0x8b],
+            "fixture must be REAL gzip wire bytes (magic 1f 8b)"
+        );
+        let mut t = crate::timeline::Timeline::new();
+        t.record_request(
+            "POST",
+            "/v1/chat/completions",
+            &[("content-encoding".to_string(), "gzip".to_string())],
+            gz,
+        );
+        let c = compose(&t, false);
+        // F1-EXIT (brief §1): structured decomposition of the REAL body,
+        // NOT the Layer-2 raw-body fallback (which on a compressed body is
+        // a non-result for the flagship — 0 indictments).
+        assert!(
+            c.focus_step.is_some(),
+            "F1 blind on a real gzip capture (focus None)"
+        );
+        assert!(
+            !c.components
+                .iter()
+                .any(|x| x.label.contains("structured parse failed")),
+            "F1 fell back to Layer-2 raw-body on a real gzip capture: {:?}",
+            c.components
+        );
+        let by = |l: &str| c.components.iter().find(|x| x.label == l).map(|x| x.tokens);
+        assert!(by("system").unwrap_or(0) > 0, "system must decompose");
+        assert!(by("history").unwrap_or(0) > 0, "history must decompose");
+        assert!(
+            by("tool-schemas").unwrap_or(0) > 0,
+            "tool-schemas must decompose"
+        );
+        // The real body declares 2 tools and calls none ⇒ the flagship
+        // waste indictment must fire (proves real decomposition, not just
+        // a non-empty count).
+        assert!(
+            c.indictments
+                .iter()
+                .any(|i| i.code == "unused-loaded-tools"),
+            "real decomposition must indict the 2 unused tools, got {:?}",
+            c.indictments.iter().map(|i| &i.code).collect::<Vec<_>>()
+        );
+    }
+
     fn step_with(system: &str, n_msgs: usize, tools: &str) -> Vec<u8> {
         let msgs: Vec<String> = (0..n_msgs)
             .map(|k| format!(r#"{{"role":"user","content":"message number {k} of this turn"}}"#))
