@@ -137,3 +137,30 @@ child, not streamed-through chunk-by-chunk. Consequences, stated plainly:
 Rationale: PROJECT.md §6 lists F1/F2/F3 as the views on F0; streaming fidelity is an
 orthogonal transport concern. Claiming streaming now would be the kind of overclaim the
 project explicitly rejects ("knowing what NOT to build, with proof, is the signal").
+
+---
+
+## D-005 — F1 is `ctx run`'s default headline WITHOUT regressing the F0 `--json` timeline contract (2026-05-17)
+
+### Status: LOCKED. Goal-2/2 design reconciliation (no silent pick).
+
+The fork: D-001 + PROJECT.md §6 say **F1 (composition + waste) is the default headline of
+`ctx run`**. But F0's `tests/wire_capture.rs` pins `ctx run --json` to the raw timeline
+(`tl["steps"][..]`), and the HARD INVARIANT forbids regressing R/F0.
+
+Resolution (zero F0 regression, D-001 honored):
+- **`ctx run` / `ctx open` human output → the F1 headline** (composition + waste,
+  pure-measurement; `--deep` for contestable detail). F0's timeline *summary* was an
+  explicit placeholder; F1 taking the headline is the roadmap, not a regression — the F0
+  *mechanism* (wire capture, step-timeline model, opt-in SQLite, ±N% tokenizer, the
+  `steps[]` data) is unchanged and still fully tested.
+- **`--json` emits `RunReport { #[serde(flatten)] timeline, composition }`** → JSON is
+  `{"steps":[...], "composition":{...}}`. `tl["steps"]` stays top-level, so every F0
+  `wire_capture`/snapshot assertion remains green **untouched**; F1's structured data is
+  additive at `tl["composition"]`.
+- `render::summary` (the F0 timeline plain render) is **kept intact** (its snapshot stays
+  valid); F1 is a new `render` path the CLI default now calls.
+- F2 = `ctx view <step>` (verbatim pager, one-shot + TUI). F3 = `ctx diff <a> <b>`
+  (per-step wire diff). Both are **new subcommands** — zero F0 surface change.
+
+This keeps R/F0 bit-for-bit intact while delivering F1/F2/F3 exactly per D-001/§6.
