@@ -1,0 +1,5 @@
+{
+  "enabledPlugins": {
+    "rust@rust-cc": true
+  }
+}
