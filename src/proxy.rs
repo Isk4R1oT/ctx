@@ -34,6 +34,12 @@ const STRIP: &[&str] = &[
     "upgrade",
 ];
 
+/// Deliberate ceiling on a single captured request body. A transparent
+/// proxy must not OOM on a misbehaving agent; an overflow is surfaced as
+/// an error, never silently truncated. (Assembled LLM prompts are well
+/// under this; raised if a real workload ever needs it.)
+const MAX_BODY: usize = 64 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct ProxyState {
     pub client: reqwest::Client,
@@ -70,15 +76,26 @@ async fn proxy(State(state): State<ProxyState>, req: Request) -> Response {
     match forward(state, req).await {
         Ok(resp) => resp,
         Err(e) => {
+            eprintln!("ctx: proxy error: {e}");
             let body = format!("ctx proxy error: {e}");
             Response::builder()
                 .status(502)
                 .body(Body::from(body))
-                .unwrap_or_else(|_| Response::new(Body::empty()))
+                .unwrap_or_else(|build_err| {
+                    eprintln!("ctx: failed to build 502 response: {build_err}");
+                    Response::new(Body::empty())
+                })
         }
     }
 }
 
+/// Forward one captured request to the real upstream.
+///
+/// NOT cancel-safe: a cancel between `send()` and `record_response`
+/// would drop the response capture and leave the upstream's (possibly
+/// billed) work unacknowledged. The server is therefore shut down by
+/// **draining** in-flight calls (`with_graceful_shutdown`), never by
+/// `abort()` — see `run::execute`.
 async fn forward(state: ProxyState, req: Request) -> crate::Result<Response> {
     let (parts, body) = req.into_parts();
     let method = parts.method.clone();
@@ -89,9 +106,9 @@ async fn forward(state: ProxyState, req: Request) -> crate::Result<Response> {
     let path = parts.uri.path().to_string();
     let req_headers = header_pairs(&parts.headers);
 
-    let body_bytes = axum::body::to_bytes(body, usize::MAX)
-        .await
-        .map_err(|e| crate::Error::Adapter(format!("reading request body: {e}")))?;
+    let body_bytes = axum::body::to_bytes(body, MAX_BODY).await.map_err(|e| {
+        crate::Error::Adapter(format!("reading request body (max {MAX_BODY}B): {e}"))
+    })?;
 
     // Capture BEFORE forwarding — the F0 EXIT criterion.
     let provider = Provider::detect(&path, &req_headers);

@@ -90,6 +90,46 @@ async fn captures_verbatim_wire_prompt_for_both_providers() {
 }
 
 #[tokio::test]
+async fn graceful_shutdown_loses_no_steps_under_back_to_back_load() {
+    // Regression for the abort-vs-try_unwrap race: every request a
+    // multi-call agent makes must survive shutdown with its response.
+    let anthropic = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"a"})))
+        .mount(&anthropic)
+        .await;
+
+    let n = 5;
+    let script = format!(
+        "for i in $(seq 1 {n}); do \
+           curl -s -o /dev/null -X POST \"$ANTHROPIC_BASE_URL/v1/messages\" \
+             -H 'content-type: application/json' -d '{ANTHROPIC_BODY}'; \
+         done"
+    );
+
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .args(["run", "--json", "--", "sh", "-c", &script])
+        .env("CTX_UPSTREAM_ANTHROPIC", anthropic.uri())
+        .env("NO_COLOR", "1")
+        .output()
+        .await
+        .expect("spawn ctx");
+    assert!(out.status.success());
+
+    let tl: Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let steps = tl["steps"].as_array().expect("steps");
+    assert_eq!(steps.len(), n, "no step may be lost across shutdown");
+    for (i, s) in steps.iter().enumerate() {
+        assert_eq!(
+            s["response"]["status"], 200,
+            "step {i} must keep its recorded response (drain, not abort)"
+        );
+        assert_eq!(s["request"]["body"].as_str().unwrap(), ANTHROPIC_BODY);
+    }
+}
+
+#[tokio::test]
 async fn save_then_open_roundtrips_through_the_binary() {
     let anthropic = MockServer::start().await;
     Mock::given(method("POST"))
@@ -153,6 +193,12 @@ async fn bare_invocation_renders_the_banner() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("ctx"), "banner names the tool");
     assert!(s.contains("ctx run -- "), "banner shows the primary verb");
+    // Pin the actual banner render so a regression to plain text is
+    // caught: rounded box corner + the doc-11 spark glyph, with color
+    // escapes present (--color always over a pipe).
+    assert!(s.contains('\u{256D}'), "rounded box top-left corner");
+    assert!(s.contains('\u{273B}'), "doc-11 banner spark glyph");
+    assert!(s.contains('\u{1b}'), "--color always must emit ANSI");
     // Strongest family rule: no emoji, ever.
     assert!(!s.chars().any(|c| c as u32 >= 0x1_F000));
 }

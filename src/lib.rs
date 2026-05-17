@@ -35,8 +35,10 @@ use crate::store::Sink;
 pub async fn run_app(cli: Cli) -> Result<i32> {
     let env = Env::capture();
     let flag = cli.color.into();
+    // stdout color resolved once at startup (doc-11 §1.3). stderr is
+    // resolved independently when a stderr renderer exists (spinner is
+    // post-F0); not computed speculatively here.
     let stdout_mode = color::for_stream(flag, &env, Stream::Stdout);
-    let _stderr_mode = color::for_stream(flag, &env, Stream::Stderr);
     let renderer = Renderer::new(stdout_mode);
 
     let stdout = std::io::stdout();

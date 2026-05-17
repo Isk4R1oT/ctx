@@ -60,13 +60,14 @@ fn write_into(conn: &Connection, timeline: &Timeline) -> crate::Result<()> {
     conn.execute_batch(SCHEMA)?;
     conn.execute(
         "INSERT INTO session (created_at, ctx_version) VALUES (?1, ?2)",
-        rusqlite::params![now_rfc3339(), env!("CARGO_PKG_VERSION")],
+        rusqlite::params![now_epoch_secs(), env!("CARGO_PKG_VERSION")],
     )?;
     let session_id = conn.last_insert_rowid();
     for step in &timeline.steps {
-        let provider = step
-            .provider
-            .map(|p| serde_json::to_string(&p).unwrap_or_default());
+        let provider = step.provider.map(|p| match p {
+            crate::adapter::Provider::Anthropic => "anthropic",
+            crate::adapter::Provider::OpenAiCompat => "open_ai_compat",
+        });
         let status = step.response.as_ref().map(|r| i64::from(r.status));
         conn.execute(
             "INSERT INTO step (session_id, idx, provider, req_method, req_path, status, prompt_tokens)
@@ -134,13 +135,14 @@ pub fn load(path: &Path) -> crate::Result<Timeline> {
 
     for row in rows {
         let (idx, method, path, status) = row?;
-        let body: Vec<u8> = conn
-            .query_row(
-                "SELECT body FROM capture WHERE session_id=?1 AND idx=?2 AND kind='request'",
-                rusqlite::params![session_id, idx],
-                |r| r.get(0),
-            )
-            .unwrap_or_default();
+        // The request capture is `BLOB NOT NULL` and always written by
+        // `write_into`; its absence means a corrupt/foreign DB — the
+        // exact thing `ctx open` must surface, not silently paper over.
+        let body: Vec<u8> = conn.query_row(
+            "SELECT body FROM capture WHERE session_id=?1 AND idx=?2 AND kind='request'",
+            rusqlite::params![session_id, idx],
+            |r| r.get(0),
+        )?;
         let resp_body: Option<Vec<u8>> = conn
             .query_row(
                 "SELECT body FROM capture WHERE session_id=?1 AND idx=?2 AND kind='response'",
@@ -158,9 +160,10 @@ pub fn load(path: &Path) -> crate::Result<Timeline> {
     Ok(timeline)
 }
 
-fn now_rfc3339() -> String {
+fn now_epoch_secs() -> String {
     // Avoid pulling `chrono` for one timestamp: seconds since epoch is a
-    // stable, dependency-free, snapshot-redactable value.
+    // stable, dependency-free, snapshot-redactable value (the column is
+    // `created_at TEXT`, format `epoch:<secs>` — name says what it is).
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
