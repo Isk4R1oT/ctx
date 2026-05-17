@@ -37,4 +37,14 @@ Provider-adapter trait · tokenizer registry · component-classifier interface �
 
 ## Status
 
-Spec/roadmap complete (this repo). Name `ctx` provisional — collision-check + rename is the first **pre-publish** gate (`docs/PROJECT.md` §11), not a pre-build gate. Next: implement F0.
+Spec/roadmap complete (this repo). Name `ctx` provisional — collision-check + rename is the first **pre-publish** gate (`docs/PROJECT.md` §11), not a pre-build gate. F0 implementation in progress (see `docs/DECISIONS.md`).
+
+## Rust (rust-cc plugin active)
+- The compiler is the oracle: after Rust edits, `cargo check` is run by a
+  gate; fix the digest's root-cause class first (one class per iteration).
+- Errors → `thiserror` (lib) / `anyhow` (bin). Never `unwrap()`/`expect()`
+  outside tests; propagate with `?`.
+- Never `.clone()` to silence a borrow error — fix ownership.
+- Verify crate APIs (context7 / rust-analyzer), never from memory.
+- Don't commit a red build; not done until `cargo check` is green.
+- Run `just check` / `just test`. See `../../rust-cc/COMPILER-TRUTH.md` and `docs/DECISIONS.md` (D-001 canonical CLI surface).

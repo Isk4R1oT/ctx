@@ -1,0 +1,5 @@
+# Reproducible diagnostics across runs/machines; rust-src + rust-analyzer
+# enable headless code intelligence (COMPILER-TRUTH Law 2).
+[toolchain]
+channel = "stable"
+components = ["clippy", "rustfmt", "rust-analyzer", "rust-src"]

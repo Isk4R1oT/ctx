@@ -1,0 +1,9 @@
+# sccache cuts rebuild latency → more agent iterations. (mold omitted:
+# Linux-only linker, this is macOS — default ld-prime is fine.)
+[build]
+rustc-wrapper = "sccache"
+
+# Tiny stable surface for the compiler-truth loop.
+[alias]
+a-check = "clippy --all-targets --all-features --message-format=json -- -D warnings"
+a-test  = "nextest run --no-fail-fast"

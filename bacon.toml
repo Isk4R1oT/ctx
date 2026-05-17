@@ -1,0 +1,12 @@
+# `rustcc digest --from bacon` parses exactly this line_format. A running
+# bacon gives a structured stream with zero per-edit process spin-up.
+[jobs.check]
+command = ["cargo", "check", "--all-targets", "--message-format", "json-diagnostic-rendered-ansi"]
+
+[jobs.clippy]
+command = ["cargo", "clippy", "--all-targets", "--all-features"]
+
+[exports.locations]
+auto = true
+path = ".bacon-locations"
+line_format = "{kind} {path}:{line}:{column} {message}"
