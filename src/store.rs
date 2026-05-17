@@ -197,6 +197,18 @@ mod tests {
             .unwrap();
         assert_eq!(steps, 1);
         assert_eq!(caps, 1);
+
+        // Pins the `created_at` contract (kills the `now_epoch_secs`
+        // -> ""/"xyzzy" mutants — the timestamp must be the documented
+        // `epoch:<secs>` form, not empty/arbitrary).
+        let created_at: String = conn
+            .query_row("SELECT created_at FROM session", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            created_at.starts_with("epoch:"),
+            "created_at must be epoch:<secs>, got {created_at:?}"
+        );
+        assert!(created_at["epoch:".len()..].parse::<u64>().is_ok());
     }
 
     #[test]

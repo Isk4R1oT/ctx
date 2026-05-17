@@ -14,13 +14,6 @@ pub enum ColorMode {
     None,
 }
 
-impl ColorMode {
-    #[must_use]
-    pub fn enabled(self) -> bool {
-        self != ColorMode::None
-    }
-}
-
 /// The `--color` flag value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorFlag {
@@ -70,10 +63,8 @@ fn palette_depth(env: &Env) -> ColorMode {
     if term.contains("256color") || term.contains("-256") {
         return ColorMode::Ansi256;
     }
-    if term.is_empty() && ct.is_empty() {
-        // Undecidable ⇒ never assume truecolor (§1.3 rule 7).
-        return ColorMode::Ansi16;
-    }
+    // Anything else (incl. undecidable) ⇒ Ansi16; never assume truecolor
+    // (§1.3 rule 7).
     ColorMode::Ansi16
 }
 
@@ -195,5 +186,55 @@ mod tests {
             term: Some("screen-256color".into()),
         };
         assert_eq!(resolve(ColorFlag::Auto, &e, true), ColorMode::Ansi256);
+    }
+
+    fn env_with(colorterm: Option<&str>, term: Option<&str>) -> Env {
+        Env {
+            no_color: false,
+            clicolor_force: None,
+            clicolor: None,
+            colorterm: colorterm.map(str::to_string),
+            term: term.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn depth_truecolor_from_truecolor_token_alone() {
+        // Pins the `||` in palette_depth: "truecolor" alone (no "24bit")
+        // must still be Truecolor (kills `|| -> &&`).
+        let e = env_with(Some("truecolor"), Some("xterm"));
+        assert_eq!(resolve(ColorFlag::Always, &e, false), ColorMode::Truecolor);
+    }
+
+    #[test]
+    fn depth_truecolor_from_24bit_token_alone() {
+        // The other `||` operand alone (kills `|| -> &&` from both sides).
+        let e = env_with(Some("24bit"), None);
+        assert_eq!(resolve(ColorFlag::Always, &e, false), ColorMode::Truecolor);
+    }
+
+    #[test]
+    fn depth_256_from_each_marker_alone() {
+        // `screen-256color` contains BOTH "256color" and "-256", so it
+        // can't pin the `||` in the 256 check. Exercise each operand
+        // alone (kills `|| -> &&` in palette_depth's 256 branch).
+        let only_256color = env_with(None, Some("xterm256color")); // no "-256"
+        assert_eq!(
+            resolve(ColorFlag::Always, &only_256color, true),
+            ColorMode::Ansi256
+        );
+        let only_dash256 = env_with(None, Some("foo-256")); // no "256color"
+        assert_eq!(
+            resolve(ColorFlag::Always, &only_dash256, true),
+            ColorMode::Ansi256
+        );
+    }
+
+    #[test]
+    fn depth_ansi16_for_non_256_non_truecolor_term() {
+        // Non-empty, non-256, non-truecolor ⇒ Ansi16 (pins the final
+        // fallthrough after the redundant block was removed).
+        let e = env_with(Some(""), Some("dumb"));
+        assert_eq!(resolve(ColorFlag::Always, &e, true), ColorMode::Ansi16);
     }
 }

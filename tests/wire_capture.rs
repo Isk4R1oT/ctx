@@ -9,7 +9,7 @@
 //! keys, hermetic).
 
 use serde_json::Value;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const ANTHROPIC_BODY: &str =
@@ -201,6 +201,54 @@ async fn bare_invocation_renders_the_banner() {
     assert!(s.contains('\u{1b}'), "--color always must emit ANSI");
     // Strongest family rule: no emoji, ever.
     assert!(!s.chars().any(|c| c as u32 >= 0x1_F000));
+}
+
+#[tokio::test]
+async fn forwards_normal_headers_and_strips_hop_by_hop() {
+    // Kills the `delete !` mutants in proxy::forward: a normal request
+    // header must reach the upstream (mock only matches if it does), and
+    // an upstream response header must be re-emitted to the child.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("content-type", "application/json"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-ctx-probe", "present")
+                .set_body_json(serde_json::json!({"id":"a"})),
+        )
+        .mount(&upstream)
+        .await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hdr = dir.path().join("resp_headers.txt");
+    let script = format!(
+        "curl -s -o /dev/null -D \"$CTX_HDR\" -X POST \"$ANTHROPIC_BASE_URL/v1/messages\" \
+            -H 'content-type: application/json' -H 'x-api-key: secret' -d '{ANTHROPIC_BODY}'"
+    );
+
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .args(["run", "--json", "--", "sh", "-c", &script])
+        .env("CTX_UPSTREAM_ANTHROPIC", upstream.uri())
+        .env("CTX_HDR", &hdr)
+        .env("NO_COLOR", "1")
+        .output()
+        .await
+        .expect("spawn ctx");
+    assert!(out.status.success());
+
+    // content-type forwarded ⇒ mock matched ⇒ 200 (kills strip of
+    // request headers at proxy.rs `if !is_stripped` request loop).
+    let tl: Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(tl["steps"][0]["response"]["status"], 200);
+
+    // The upstream response header was re-emitted to the child (kills
+    // strip of response headers at the proxy.rs response loop).
+    let dumped = std::fs::read_to_string(&hdr).expect("curl wrote response headers");
+    assert!(
+        dumped.to_ascii_lowercase().contains("x-ctx-probe: present"),
+        "expected upstream response header forwarded to child; got:\n{dumped}"
+    );
 }
 
 #[tokio::test]

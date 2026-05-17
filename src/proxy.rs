@@ -172,4 +172,13 @@ mod tests {
         assert!(!is_stripped("content-type"));
         assert!(!is_stripped("x-api-key"));
     }
+
+    #[test]
+    fn max_body_is_the_documented_ceiling() {
+        // Pins the safety ceiling (kills the `*`→`+` arithmetic mutants);
+        // a regression here is an OOM-bound change, not a nit. black_box
+        // keeps it a real runtime check (not a const-folded assertion).
+        let actual = std::hint::black_box(MAX_BODY);
+        assert_eq!(actual, 64 * 1024 * 1024);
+    }
 }
