@@ -42,7 +42,9 @@ const MAX_DECOMPRESSED: usize = 64 * 1024 * 1024;
 /// valid-JSON body never starts with `1f 8b`, so clean captures are
 /// byte-identical (F0/F2/F3 unaffected).
 fn decode_with_limit(body: &[u8], limit: usize) -> Cow<'_, [u8]> {
-    if body.len() < 2 || body[0] != 0x1f || body[1] != 0x8b {
+    // Slice-pattern (not `len()`+indexing): no possible out-of-bounds,
+    // and no `<`/`||`/index operators for a mutant to silently flip.
+    if !matches!(body.get(..2), Some([0x1f, 0x8b])) {
         return Cow::Borrowed(body);
     }
     let mut out = Vec::new();
@@ -220,6 +222,26 @@ mod tests {
         assert_eq!(&*got, bad.as_slice(), "corrupt gzip ⇒ raw bytes kept");
         let fake = [0x1f, 0x8b, 0x00, 0x01, 0x02];
         assert_eq!(&*decode_request_body(&fake), &fake);
+    }
+
+    #[test]
+    fn max_decompressed_is_the_documented_ceiling() {
+        // Pins the decompression-bomb bound (kills the `*`→`+`
+        // arithmetic mutants); a regression here is an OOM-bound change,
+        // not a nit. `black_box` keeps it a real runtime check (not a
+        // const-folded assertion) — same discipline as `proxy::MAX_BODY`.
+        let actual = std::hint::black_box(MAX_DECOMPRESSED);
+        assert_eq!(actual, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn decode_tiny_inputs_are_borrowed_unchanged_no_panic() {
+        // Sub-2-byte / partial-magic inputs must be returned untouched
+        // without panicking (no len()/index OOB) — pins the slice-guard.
+        for b in [&b""[..], &b"{"[..], &[0x1f][..], &[0x1f, 0x8b][..]] {
+            let got = decode_request_body(b);
+            assert_eq!(&*got, b, "tiny input {b:?} must pass through verbatim");
+        }
     }
 
     #[test]

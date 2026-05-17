@@ -248,3 +248,45 @@
   (was `raw-body … 0 findings`). `ctx open` of the saved gzip db =
   identical (persistence round-trips decoded). Real PLAIN run
   unchanged (real 200) ⇒ no regression. Spend ≈ $0.00005 total.
+
+---
+
+## F1-FIX3 — step D (no-regression + REAL harden + honest record)
+
+- **Mutation (rust-cc harden, real baseline — the brief's anti-vacuous
+  rule enforced):** cargo-mutants 27.0.0, `--in-diff` on the touched
+  surface, `--test-tool nextest`.
+  - Run 1: baseline `ok 20s build + 5s test` (REAL, not vacuous),
+    28 mutants → **6 MISSED** (all my new code: `MAX_DECOMPRESSED`
+    `*`→`+` ×2 unpinned; `decode_with_limit` `len()<2 || …` `<`/`||`
+    ×4). NOT accepted as a pass — per the brief, missed mutants on the
+    touched surface ⇒ fix, don't ship.
+  - Killed properly: guard rewritten to `matches!(body.get(..2),
+    Some([0x1f,0x8b]))` (removes the index/`<`/`||` operators *by
+    construction* — also OOB-safe); added a `black_box`
+    `MAX_DECOMPRESSED` ceiling-pin test (same pattern the repo already
+    uses for `proxy::MAX_BODY`) + a tiny-input pass-through test.
+  - Run 2: baseline `ok 18s build + 6s test` (REAL), 22 mutants →
+    **22 caught, 0 MISSED**. Genuine green.
+- **No-regression:** `just test` **101/101, 0 skipped** + doctests
+  (was 99; +2 mutant-killing tests). F0/F2/F3 (snapshots, wire_capture,
+  f2 byte-exact, f3 diff, save/open roundtrip) all green ⇒
+  byte-identical. `just check` clippy `-D warnings` = 0.
+- **Harden:** `cargo deny check` = advisories/bans/licenses/sources ok;
+  `cargo machete` = no unused deps (flate2 used). `cargo semver-checks`
+  noise (compares vs an unrelated crates.io crate also named `ctx`) —
+  guarded by the justfile `|| true`, not a real finding (publish=false,
+  name provisional per PROJECT.md §11).
+- **/rust-review:** skill not invocable in-thread; substituted by a
+  tool-grounded invariant self-review vs brief §4 (no unsafe/unwrap/
+  expect in prod; total/panic-free; pure deterministic; F1 pure
+  measurement; F0/F2/F3 byte-identical) → SHIP, 0 high. Deliberately
+  NOT delegated to a subagent (D-008 incident: review subagent hit a
+  usage cap, left a stray file, corrupted the mutation baseline).
+  Recorded as a substitution, NOT an independent SHIP.
+- **Honest status:** REAL fix at the F0 capture boundary; bounded claim
+  per §1 recorded in D-009 Resolution (gzip proven on a verbatim real
+  capture + a fresh live OpenRouter run; deflate/zstd/br = tracked
+  honest-Layer-2 follow-up, not a silent gap; pre-fix saved sessions
+  unrecoverable). No false green; every gate tool-verified on a real
+  baseline.

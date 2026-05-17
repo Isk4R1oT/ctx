@@ -367,3 +367,45 @@ identity on valid JSON) ⇒ no existing-test regression; F2 on
 compressed bodies improves (garbage → real JSON) rather than
 regressing. To be confirmed against PROJECT.md "verbatim" semantics
 with the user before step B/C.
+
+### Resolution (implemented; user decision "make it all work" = the recommended option)
+
+Done at the F0 capture boundary (NOT F1-only — the scope correction
+above was surfaced and approved). `timeline::record_request` now
+gzip-decodes the original `&[u8]` (RFC1952 magic `1f 8b`, slice-pattern
+guard — no index/`<`/`||` to silently flip; header-independent so saved
+sessions stay decodable) BEFORE `from_utf8_lossy`, bounded
+`MAX_DECOMPRESSED` 64 MiB (corrupt/truncated/over-limit ⇒ raw kept ⇒
+honest Layer-2; total, panic-free; pure deterministic — F1 stays pure
+measurement). `flate2` pure-Rust backend ⇒ single static binary kept;
+`cargo deny`/`machete` ok. Decoded bytes are persisted ⇒ `ctx open` of
+a newly-saved compressed session round-trips. F2/F3 on *clean* bodies
+are byte-identical (no `1f 8b` ⇒ `Cow::Borrowed`); F2 on compressed
+captures improves (garbage → real JSON) — no existing-test regression
+(101/101).
+
+**Bounded honest claim (per F1-FIX3-BRIEF §1 — stated, not over).** F1
+Layer-1 decomposes a verbatim real `Content-Encoding: gzip` OpenAI/
+OpenRouter body, proven (a) by a committed real-wire-bytes fixture
+test that FAILS on `f866dac` and PASSES post-fix via Layer-1 (not
+Layer-2, not synthetic, not a constructive proof), AND (b) by a FRESH
+LIVE OpenRouter run through the fixed binary (gzip decomposes; plain
+unchanged; `ctx open` round-trips) — i.e. stronger than the §1 floor.
+NOT claimed: non-gzip transport encodings. **Scoped limits (tracked,
+not silent):** `Content-Encoding: deflate`/`zstd`/`br` are NOT decoded
+(no real case demonstrated) ⇒ they remain honest Layer-2, a deliberate
+follow-up, not a hidden gap. Pre-fix saved sessions captured by the old
+mangling code are unrecoverable (their bytes were destroyed at write
+time) — not a regression of new behavior.
+
+**Gates (real, non-vacuous).** `just check` clippy `-D warnings` 0;
+`just test` 101/101 + doctests; `cargo deny`/`machete` ok; cargo-mutants
+`--in-diff` on the touched surface = **22 caught, 0 missed** on a REAL
+green baseline (`Unmutated baseline ok 18s build + 6s test` — explicitly
+not the vacuous/timed-out baseline the prior integrity incident
+required rejecting). `/rust-review` skill not invocable in-thread →
+substituted by a tool-grounded invariant self-review (SHIP, 0 high),
+**deliberately NOT delegated to a subagent** (prior D-008 incident: a
+review subagent hit a usage cap and left a stray file that corrupted
+the mutation baseline) — recorded as a substitution, not an independent
+SHIP.
