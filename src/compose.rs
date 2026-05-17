@@ -678,7 +678,6 @@ mod tests {
     // failure is demonstrated and recorded in RUSTCC-USAGE.md, the test
     // is un-ignored in step C (D-009).
     #[test]
-    #[ignore = "F1-FIX3 step B: fails on f866dac (compressed body mangled at the F0 capture boundary); un-ignored + fixed in step C / D-009"]
     fn f1_decomposes_real_gzip_openai_capture() {
         let gz = include_bytes!("../tests/fixtures/real_openai_gzip_request.bin");
         // Guard: the fixture must really be gzip — a future regen that

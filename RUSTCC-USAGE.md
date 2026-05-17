@@ -210,3 +210,41 @@
   `#[ignore]`d (reason string documents why) so the gate is NOT
   bypassed; the pre-fix failure is demonstrated above, un-ignored in
   step C. No `--no-verify`, no `RUSTCC_GATES=off`.
+
+---
+
+## F1-FIX3 — step C (fix at the F0 capture boundary; rust-cc loop, real e2e verified)
+
+- **Dep (rust-cc deps discipline):** context7 was UNAVAILABLE (HTTP
+  403); per the project oracle ("the compiler is the oracle") the
+  `flate2` API was verified by the compiler-truth loop instead of
+  docs — recorded as an honest substitution, not a silent skip.
+  Added `flate2 = { version = "1.0.35", default-features = false,
+  features = ["rust_backend"] }` — pure-Rust (miniz_oxide), no system
+  zlib ⇒ single static binary preserved; `cargo machete` (step D)
+  confirms it is used.
+- **Fix (root cause, D-009):** `src/timeline.rs` — decode a gzip wire
+  body (RFC1952 magic `1f 8b`, header-independent so saved sessions
+  stay decodable) on the original `&[u8]` BEFORE `from_utf8_lossy`,
+  bounded by `MAX_DECOMPRESSED` (64 MiB; over-limit/corrupt/truncated
+  ⇒ raw kept ⇒ honest Layer-2, never a panic, never a partial body
+  to the parser). NOT in `adapter::parse` (where D-007/D-008 wrongly
+  patched). Pure deterministic; no judge; F1 stays pure measurement.
+- **Compiler-truth loop (real, not claimed):** Edit→PostToolUse
+  `rustcc` digest; `just check` first RED — `error[E0716]` temporary
+  dropped while borrowed in a new test; fix = the compiler-suggested
+  `let` binding (1 trivial lifetime case, < borrow-surgeon threshold).
+  Re-run `just check` = GREEN (`clippy --all-targets --all-features
+  -D warnings`, 0 warnings — also validates the flate2 API).
+- **Suite:** `just test` = **99 tests run: 99 passed, 0 skipped** +
+  doctests ok. Was 94; +1 (step-B test now UN-IGNORED and PASSING
+  via Layer-1 on the verbatim real gzip body) +4 decode unit tests
+  (passthrough / roundtrip / corrupt→raw / over-limit→raw). All F0/
+  F2/F3 (snapshots, wire_capture, f2 byte-exact, f3 diff, save/open
+  roundtrip) GREEN ⇒ byte-identical, zero-regression.
+- **REAL end-to-end (green ≠ works — verified on live OpenRouter):**
+  fixed binary on a real `Content-Encoding: gzip` client → F1 now
+  `system 16 · tool-schemas 53 · history 31 · unused-loaded-tools`
+  (was `raw-body … 0 findings`). `ctx open` of the saved gzip db =
+  identical (persistence round-trips decoded). Real PLAIN run
+  unchanged (real 200) ⇒ no regression. Spend ≈ $0.00005 total.
