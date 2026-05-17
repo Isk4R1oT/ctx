@@ -1,0 +1,64 @@
+---
+source: tests/snapshots.rs
+expression: "compose(&f1_fixture(), true)"
+---
+{
+  "focus_step": 1,
+  "total_tokens": 48,
+  "components": [
+    {
+      "label": "system",
+      "tokens": 11,
+      "pct": 22
+    },
+    {
+      "label": "tool-schemas",
+      "tokens": 12,
+      "pct": 25
+    },
+    {
+      "label": "history",
+      "tokens": 25,
+      "pct": 52
+    }
+  ],
+  "tools_deep": [
+    {
+      "label": "tool:search",
+      "tokens": 6,
+      "pct": 12
+    },
+    {
+      "label": "tool:calc",
+      "tokens": 6,
+      "pct": 12
+    }
+  ],
+  "indictments": [
+    {
+      "code": "unused-loaded-tools",
+      "detail": "1 of 2 loaded tools never called this run",
+      "wasted_tokens": 6
+    },
+    {
+      "code": "duplicate-block",
+      "detail": "step 1: 1 verbatim-duplicated block(s) in one prompt",
+      "wasted_tokens": 9
+    },
+    {
+      "code": "repeated-block-across-turns",
+      "detail": "1 block(s) re-sent verbatim across >=2 turns",
+      "wasted_tokens": 9
+    },
+    {
+      "code": "unpruned-history",
+      "detail": "history grew 1->3 msgs over 2 turns, never pruned (25 tok carried after turn 0)",
+      "wasted_tokens": 25
+    },
+    {
+      "code": "preamble-repay",
+      "detail": "system prompt re-paid: 1 extra payment(s) across 1 variant(s)",
+      "wasted_tokens": 11
+    }
+  ]
+}

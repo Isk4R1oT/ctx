@@ -164,3 +164,17 @@ Resolution (zero F0 regression, D-001 honored):
   (per-step wire diff). Both are **new subcommands** — zero F0 surface change.
 
 This keeps R/F0 bit-for-bit intact while delivering F1/F2/F3 exactly per D-001/§6.
+
+---
+
+## D-006 — Honest follow-up: `timeline.rs` token-sum overflow twin (2026-05-17)
+
+Independent review (F1 harden) found `compose.rs` summed tokens with raw `.sum()`/`+`;
+fixed to saturating end-to-end (F1 in scope). The **same pattern pre-exists in
+`src/timeline.rs` `record_request` (`prompt_tokens`)** — F0 code, frozen and already
+harden-cleared. Per the HARD INVARIANT "do NOT regress R/F0 / do not re-scope", F0 is
+left untouched here; this is **recorded, not hidden** (intellectual-honesty principle):
+on a pathological unbounded `ctx open` session the F0 `prompt_tokens` could wrap in
+release / panic in debug exactly like the F1 site did. Tracked as a follow-up to apply
+the same `sat_sum` discipline to `timeline.rs` in a dedicated F0-maintenance change
+(its own rust-cc loop + re-harden), not folded silently into F1.

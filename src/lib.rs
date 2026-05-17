@@ -10,6 +10,7 @@ mod error;
 pub mod adapter;
 pub mod cli;
 pub mod color;
+pub mod compose;
 pub mod proxy;
 pub mod render;
 pub mod run;
@@ -53,20 +54,23 @@ pub async fn run_app(cli: Cli) -> Result<i32> {
             let outcome = run::execute(&command).await?;
             let sink = save.map_or(Sink::Ephemeral, Sink::Sqlite);
             store::persist(&outcome.timeline, &sink)?;
+            // F1 is the headline (D-005). --json keeps `steps` top-level.
+            let comp = compose::compose(&outcome.timeline, cli.deep);
             if cli.json {
-                renderer.json(&mut out, &outcome.timeline)?;
+                renderer.report_json(&mut out, &outcome.timeline, &comp)?;
             } else {
-                renderer.summary(&mut out, &outcome.timeline)?;
+                renderer.composition(&mut out, &comp)?;
             }
             out.flush()?;
             Ok(outcome.exit_code)
         }
         Some(Cmd::Open { path }) => {
             let timeline = store::load(&path)?;
+            let comp = compose::compose(&timeline, cli.deep);
             if cli.json {
-                renderer.json(&mut out, &timeline)?;
+                renderer.report_json(&mut out, &timeline, &comp)?;
             } else {
-                renderer.summary(&mut out, &timeline)?;
+                renderer.composition(&mut out, &comp)?;
             }
             out.flush()?;
             Ok(0)

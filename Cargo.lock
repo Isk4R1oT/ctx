@@ -355,13 +355,10 @@ dependencies = [
 name = "ctx"
 version = "0.1.0"
 dependencies = [
- "anstream",
  "anstyle",
  "anyhow",
  "axum",
- "bytes",
  "clap",
- "futures-util",
  "insta",
  "reqwest",
  "rusqlite",

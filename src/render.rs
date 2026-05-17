@@ -35,11 +35,11 @@ fn accent(mode: ColorMode) -> Style {
     Style::new().fg_color(c).bold()
 }
 
-fn dim(mode: ColorMode) -> Style {
-    match mode {
-        ColorMode::None => Style::new(),
-        _ => Style::new().dimmed(),
-    }
+/// Dimmed secondary style. Only ever called on a colored path — plain
+/// (`ColorMode::None`) renders via the dedicated `*_plain` branches and
+/// never paints — so this needs no mode arm.
+fn dim() -> Style {
+    Style::new().dimmed()
 }
 
 fn paint(style: Style, s: &str) -> String {
@@ -67,7 +67,7 @@ impl Renderer {
             return Ok(());
         }
         let a = accent(self.mode);
-        let d = dim(self.mode);
+        let d = dim();
         let width = 58;
         let line = HZ.to_string().repeat(width);
         writeln!(w, "{TL}{line}{TR}")?;
@@ -94,7 +94,7 @@ impl Renderer {
     /// Propagates any write error to the supplied stream.
     pub fn summary(&self, w: &mut impl Write, t: &Timeline) -> std::io::Result<()> {
         let a = accent(self.mode);
-        let d = dim(self.mode);
+        let d = dim();
         let steps = t.steps.len();
         let toks = t.total_prompt_tokens();
 
@@ -169,6 +169,164 @@ impl Renderer {
         let s = serde_json::to_string_pretty(t)?;
         writeln!(w, "{s}")?;
         Ok(())
+    }
+
+    /// `--json` for `run`/`open`: `{ "steps": [...], "composition": {...} }`
+    /// — `steps` stays top-level (F0 contract preserved, D-005), F1 data
+    /// additive at `composition`.
+    ///
+    /// # Errors
+    /// Propagates serialization or write errors.
+    pub fn report_json(
+        &self,
+        w: &mut impl Write,
+        t: &Timeline,
+        c: &crate::compose::Composition,
+    ) -> crate::Result<()> {
+        #[derive(serde::Serialize)]
+        struct RunReport<'a> {
+            #[serde(flatten)]
+            timeline: &'a Timeline,
+            composition: &'a crate::compose::Composition,
+        }
+        let s = serde_json::to_string_pretty(&RunReport {
+            timeline: t,
+            composition: c,
+        })?;
+        writeln!(w, "{s}")?;
+        Ok(())
+    }
+
+    /// The F1 headline — composition + waste indictment (PROJECT.md §6).
+    /// Pure measurement; `--deep` per-tool detail is in `c.tools_deep`.
+    /// `ColorMode::None` ⇒ one grep-clean record per line (doc 11 §2.4).
+    ///
+    /// # Errors
+    /// Propagates any write error to the supplied stream.
+    pub fn composition(
+        &self,
+        out: &mut impl Write,
+        comp: &crate::compose::Composition,
+    ) -> std::io::Result<()> {
+        if self.mode == ColorMode::None {
+            Self::composition_plain(out, comp)
+        } else {
+            self.composition_tty(out, comp)
+        }
+    }
+
+    fn composition_plain(
+        out: &mut impl Write,
+        comp: &crate::compose::Composition,
+    ) -> std::io::Result<()> {
+        match comp.focus_step {
+            Some(ix) => writeln!(out, "> composition step {ix} {} tokens", comp.total_tokens)?,
+            None => writeln!(out, "> composition no captured prompt")?,
+        }
+        for part in &comp.components {
+            writeln!(
+                out,
+                "component {} {} {}%",
+                part.label, part.tokens, part.pct
+            )?;
+        }
+        for tool in &comp.tools_deep {
+            writeln!(out, "tool {} {} {}%", tool.label, tool.tokens, tool.pct)?;
+        }
+        for ind in &comp.indictments {
+            writeln!(
+                out,
+                "waste {} wasted_tokens={} {}",
+                ind.code, ind.wasted_tokens, ind.detail
+            )?;
+        }
+        writeln!(
+            out,
+            "summary: {} tokens, {} finding(s) ({})",
+            comp.total_tokens,
+            comp.indictments.len(),
+            crate::tokenizer::ACCURACY_LABEL
+        )
+    }
+
+    fn composition_tty(
+        &self,
+        out: &mut impl Write,
+        comp: &crate::compose::Composition,
+    ) -> std::io::Result<()> {
+        let acc = accent(self.mode);
+        let faint = dim();
+        let head = match comp.focus_step {
+            Some(ix) => format!("step {ix} {SUB} {} tokens", comp.total_tokens),
+            None => "no captured prompt".to_string(),
+        };
+        writeln!(
+            out,
+            "{} Composition {}",
+            paint(acc, &ACTION.to_string()),
+            paint(faint, &head)
+        )?;
+        for part in &comp.components {
+            writeln!(
+                out,
+                "  {} {}",
+                paint(faint, &RESULT.to_string()),
+                paint(
+                    faint,
+                    &format!(
+                        "{} {SUB} {}% {SUB} {} tok",
+                        part.label, part.pct, part.tokens
+                    )
+                )
+            )?;
+        }
+        for tool in &comp.tools_deep {
+            writeln!(
+                out,
+                "     {} {}",
+                paint(faint, &SUB.to_string()),
+                paint(
+                    faint,
+                    &format!(
+                        "{} {SUB} {}% {SUB} {} tok",
+                        tool.label, tool.pct, tool.tokens
+                    )
+                )
+            )?;
+        }
+        if !comp.indictments.is_empty() {
+            writeln!(out)?;
+            writeln!(out, "{}", paint(acc, "Waste"))?;
+            for ind in &comp.indictments {
+                writeln!(
+                    out,
+                    "  {} {}",
+                    paint(faint, &RESULT.to_string()),
+                    paint(
+                        faint,
+                        &format!(
+                            "{} {SUB} ~{} tok {SUB} {}",
+                            ind.code, ind.wasted_tokens, ind.detail
+                        )
+                    )
+                )?;
+            }
+        }
+        writeln!(out)?;
+        writeln!(out, "{}", paint(acc, "Summary"))?;
+        writeln!(
+            out,
+            "  {}",
+            paint(
+                faint,
+                &format!(
+                    "{} tokens {SUB} {} finding(s) {SUB} {}",
+                    comp.total_tokens,
+                    comp.indictments.len(),
+                    crate::tokenizer::ACCURACY_LABEL
+                )
+            )
+        )
     }
 }
 
