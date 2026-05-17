@@ -17,6 +17,7 @@ pub mod run;
 pub mod store;
 pub mod timeline;
 pub mod tokenizer;
+pub mod view;
 
 pub use error::{Error, Result};
 
@@ -40,6 +41,11 @@ pub async fn run_app(cli: Cli) -> Result<i32> {
     // resolved independently when a stderr renderer exists (spinner is
     // post-F0); not computed speculatively here.
     let stdout_mode = color::for_stream(flag, &env, Stream::Stdout);
+    // Decoration & the interactive pager gate on real TTY-ness, resolved
+    // once — independent of palette, so `--color=always | pipe` stays
+    // byte-exact and never enters raw mode.
+    let stdout_tty = color::is_terminal(Stream::Stdout);
+    let stdin_tty = color::is_terminal(Stream::Stdin);
     let renderer = Renderer::new(stdout_mode);
 
     let stdout = std::io::stdout();
@@ -71,6 +77,19 @@ pub async fn run_app(cli: Cli) -> Result<i32> {
                 renderer.report_json(&mut out, &timeline, &comp)?;
             } else {
                 renderer.composition(&mut out, &comp)?;
+            }
+            out.flush()?;
+            Ok(0)
+        }
+        Some(Cmd::View { path, step, tui }) => {
+            let timeline = store::load(&path)?;
+            let sel = view::select(&timeline, step)?;
+            if cli.json {
+                view::json(&mut out, &sel)?;
+            } else if view::should_page(tui, stdout_tty, stdin_tty) {
+                view::pager(&sel)?;
+            } else {
+                view::oneshot(&mut out, stdout_tty, stdout_mode, &sel)?;
             }
             out.flush()?;
             Ok(0)

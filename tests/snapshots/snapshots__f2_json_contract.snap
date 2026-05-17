@@ -1,0 +1,12 @@
+---
+source: tests/snapshots.rs
+expression: "String::from_utf8(buf).unwrap()"
+---
+{
+  "step": 0,
+  "steps": 1,
+  "provider": "anthropic",
+  "method": "POST",
+  "path": "/v1/messages",
+  "body": "{\"model\":\"claude-3\",\"system\":\"be terse\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"
+}

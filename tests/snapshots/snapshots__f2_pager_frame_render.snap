@@ -1,0 +1,14 @@
+---
+source: tests/snapshots.rs
+expression: "view::render_to_string(&sel, 64, 10).unwrap()"
+---
+╭ ctx · verbatim · step 0/1 · anthropic · /v1/messages ────────╮
+│{"model":"claude-3","system":"be terse","messages":[{"role":"u│
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+╰ q quit · ↑/↓ scroll · PgUp/PgDn page ────────────────────────╯

@@ -25,8 +25,22 @@ pub enum ColorFlag {
 /// Which stream we are resolving for (decided independently, §1.3 rule 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stream {
+    Stdin,
     Stdout,
     Stderr,
+}
+
+/// Real per-stream TTY check, resolved once at startup. Decoration and
+/// the interactive pager gate on actual TTY-ness — never on `ColorMode`
+/// (so `--color=always | pipe` stays byte-exact and never enters raw
+/// mode); palette is a separate axis.
+#[must_use]
+pub fn is_terminal(stream: Stream) -> bool {
+    match stream {
+        Stream::Stdin => std::io::stdin().is_terminal(),
+        Stream::Stdout => std::io::stdout().is_terminal(),
+        Stream::Stderr => std::io::stderr().is_terminal(),
+    }
 }
 
 /// All environment inputs, captured explicitly so the core is a pure
@@ -105,11 +119,7 @@ pub fn resolve(flag: ColorFlag, env: &Env, is_tty: bool) -> ColorMode {
 /// Real wrapper: resolve for one stream using its actual `IsTerminal`.
 #[must_use]
 pub fn for_stream(flag: ColorFlag, env: &Env, stream: Stream) -> ColorMode {
-    let is_tty = match stream {
-        Stream::Stdout => std::io::stdout().is_terminal(),
-        Stream::Stderr => std::io::stderr().is_terminal(),
-    };
-    resolve(flag, env, is_tty)
+    resolve(flag, env, is_terminal(stream))
 }
 
 #[cfg(test)]

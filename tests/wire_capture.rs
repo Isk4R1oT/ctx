@@ -182,6 +182,56 @@ async fn save_then_open_roundtrips_through_the_binary() {
 }
 
 #[tokio::test]
+async fn f2_view_is_byte_exact_vs_captured_wire_bytes() {
+    // F2 EXIT: `ctx view` one-shot (piped) emits the assembled prompt
+    // byte-for-byte — pipe it and it equals what the agent sent.
+    let anthropic = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"a"})))
+        .mount(&anthropic)
+        .await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("s.sqlite");
+    let script = format!(
+        "curl -s -o /dev/null -X POST \"$ANTHROPIC_BASE_URL/v1/messages\" \
+            -H 'content-type: application/json' -d '{ANTHROPIC_BODY}'"
+    );
+    let run = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .args([
+            "run",
+            "--save",
+            db.to_str().unwrap(),
+            "--",
+            "sh",
+            "-c",
+            &script,
+        ])
+        .env("CTX_UPSTREAM_ANTHROPIC", anthropic.uri())
+        .env("NO_COLOR", "1")
+        .output()
+        .await
+        .expect("spawn ctx run");
+    assert!(run.status.success());
+
+    let view = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .args(["view", db.to_str().unwrap(), "--step", "0"])
+        .env("NO_COLOR", "1")
+        .output()
+        .await
+        .expect("spawn ctx view");
+    assert!(view.status.success());
+    // Byte-exact: stdout IS the captured wire prompt, nothing added.
+    assert_eq!(
+        String::from_utf8_lossy(&view.stdout),
+        ANTHROPIC_BODY,
+        "ctx view (piped) must emit the verbatim wire bytes exactly"
+    );
+    assert!(!view.stdout.contains(&0x1b), "plain view: zero escapes");
+}
+
+#[tokio::test]
 async fn bare_invocation_renders_the_banner() {
     let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
         .arg("--color")

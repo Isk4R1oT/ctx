@@ -8,6 +8,7 @@ use ctx::compose::compose;
 use ctx::render::Renderer;
 use ctx::store::SCHEMA;
 use ctx::timeline::Timeline;
+use ctx::view;
 
 /// Multi-step fixture exercising every F1 indictment (deterministic).
 fn f1_fixture() -> Timeline {
@@ -121,4 +122,54 @@ fn f1_composition_tty_render() {
     assert!(s.contains('\u{23FA}'), "TTY render carries the ⏺ glyph");
     assert!(!s.chars().any(|c| c as u32 >= 0x1_F000), "no emoji");
     insta::assert_snapshot!(s);
+}
+
+// --- F2 verbatim-context contracts ------------------------------------
+
+// Test-support fixture: the timeline is constructed right here with one
+// step, so `select(.., Some(0))` is a genuine documented invariant.
+#[allow(clippy::expect_used)]
+fn f2_step() -> view::SelectedStep {
+    let mut t = Timeline::new();
+    t.record_request(
+        "POST",
+        "/v1/messages",
+        &[],
+        br#"{"model":"claude-3","system":"be terse","messages":[{"role":"user","content":"ping"}]}"#,
+    );
+    view::select(&t, Some(0)).expect("fixture: step 0 always present")
+}
+
+#[test]
+fn f2_oneshot_plain_is_byte_exact() {
+    let sel = f2_step();
+    let mut buf = Vec::new();
+    view::oneshot(&mut buf, false, ColorMode::None, &sel).unwrap();
+    assert_eq!(buf, sel.body.as_bytes(), "plain = the wire bytes, exactly");
+    assert!(!buf.contains(&0x1b));
+    insta::assert_snapshot!(String::from_utf8(buf).unwrap());
+}
+
+#[test]
+fn f2_oneshot_tty_header_render() {
+    let sel = f2_step();
+    let mut buf = Vec::new();
+    view::oneshot(&mut buf, true, ColorMode::Truecolor, &sel).unwrap();
+    let s = String::from_utf8(buf).unwrap();
+    assert!(s.contains('\u{23FA}') && !s.chars().any(|c| c as u32 >= 0x1_F000));
+    insta::assert_snapshot!(s);
+}
+
+#[test]
+fn f2_json_contract() {
+    let sel = f2_step();
+    let mut buf = Vec::new();
+    view::json(&mut buf, &sel).unwrap();
+    insta::assert_snapshot!(String::from_utf8(buf).unwrap());
+}
+
+#[test]
+fn f2_pager_frame_render() {
+    let sel = f2_step();
+    insta::assert_snapshot!(view::render_to_string(&sel, 64, 10).unwrap());
 }

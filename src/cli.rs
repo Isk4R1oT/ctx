@@ -68,6 +68,20 @@ pub enum Cmd {
         #[arg(value_name = "FILE")]
         path: PathBuf,
     },
+
+    /// F2 — show the verbatim assembled prompt of one captured step.
+    View {
+        #[arg(value_name = "FILE")]
+        path: PathBuf,
+
+        /// Step index (default: the last captured step).
+        #[arg(long)]
+        step: Option<usize>,
+
+        /// Open the interactive pager (ignored when piped / `--json`).
+        #[arg(long)]
+        tui: bool,
+    },
 }
 
 /// Parse the process arguments.

@@ -46,6 +46,35 @@ fn paint(style: Style, s: &str) -> String {
     format!("{}{s}{}", style.render(), style.render_reset())
 }
 
+/// F2 one-shot TTY header (doc-11 grammar) printed above the verbatim
+/// body. Never called in `ColorMode::None` (that path is byte-exact).
+///
+/// # Errors
+/// Propagates write errors.
+pub fn verbatim_header(
+    w: &mut impl Write,
+    mode: ColorMode,
+    sel: &crate::view::SelectedStep,
+) -> std::io::Result<()> {
+    let acc = accent(mode);
+    let faint = dim();
+    let prov = crate::view::provider_label(sel.provider);
+    writeln!(
+        w,
+        "{} Verbatim {}",
+        paint(acc, &ACTION.to_string()),
+        paint(
+            faint,
+            &format!(
+                "step {}/{} {SUB} {prov} {SUB} {} {}",
+                sel.index, sel.steps, sel.method, sel.path
+            )
+        )
+    )?;
+    writeln!(w)?;
+    Ok(())
+}
+
 /// One-shot renderer; holds the once-resolved stdout color mode.
 pub struct Renderer {
     mode: ColorMode,

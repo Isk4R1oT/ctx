@@ -1,0 +1,5 @@
+---
+source: tests/snapshots.rs
+expression: "String::from_utf8(buf).unwrap()"
+---
+{"model":"claude-3","system":"be terse","messages":[{"role":"user","content":"ping"}]}

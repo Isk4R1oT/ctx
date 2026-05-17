@@ -1,0 +1,7 @@
+---
+source: tests/snapshots.rs
+expression: s
+---
+[1m[38;2;217;119;87m⏺[0m Verbatim [2mstep 0/1 · anthropic · POST /v1/messages[0m
+
+{"model":"claude-3","system":"be terse","messages":[{"role":"user","content":"ping"}]}

@@ -1,0 +1,37 @@
+--- src/render.rs
++++ replace verbatim_header -> std::io::Result<()> with Ok(())
+@@ -51,33 +51,17 @@
+ ///
+ /// # Errors
+ /// Propagates write errors.
+ pub fn verbatim_header(
+     w: &mut impl Write,
+     mode: ColorMode,
+     sel: &crate::view::SelectedStep,
+ ) -> std::io::Result<()> {
+-    let acc = accent(mode);
+-    let faint = dim();
+-    let prov = crate::view::provider_label(sel.provider);
+-    writeln!(
+-        w,
+-        "{} Verbatim {}",
+-        paint(acc, &ACTION.to_string()),
+-        paint(
+-            faint,
+-            &format!(
+-                "step {}/{} {SUB} {prov} {SUB} {} {}",
+-                sel.index, sel.steps, sel.method, sel.path
+-            )
+-        )
+-    )?;
+-    writeln!(w)?;
+-    Ok(())
++    Ok(()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// One-shot renderer; holds the once-resolved stdout color mode.
+ pub struct Renderer {
+     mode: ColorMode,
+ }
+ 
+ impl Renderer {

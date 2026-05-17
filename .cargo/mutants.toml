@@ -1,0 +1,27 @@
+# cargo-mutants config.
+#
+# `exclude_re` scopes out the I/O-boundary glue that is unkillable *by
+# construction* — NOT a hidden test gap. Excluding it keeps the mutation
+# score an honest measure of the TESTABLE surface instead of parking it
+# permanently at "N unkillable survivors".
+#
+#   • `pager`       — the interactive PTY event loop: cannot run without
+#                     a live terminal (ratatui raw mode + blocking
+#                     `event::read`). ALL its logic was extracted to
+#                     pure, exhaustively-tested units: `key_action`
+#                     (key → scroll/quit), `draw_pager` (TestBackend
+#                     snapshot), and the `should_page` gate (truth
+#                     table). `pager` is then only ratatui glue — same
+#                     rationale as not mutation-testing `fn main`.
+#   • `is_terminal` — a 3-line real-syscall wrapper
+#                     (`std::io::*().is_terminal()`). In any in-process
+#                     test harness every std stream is already non-tty,
+#                     so `-> false` is behaviorally identical: this env
+#                     boundary is unkillable, exactly like `for_stream`.
+#                     Zero logic; the *decisions* built on it
+#                     (`should_page`, color precedence) ARE mutation-
+#                     tested.
+#
+# `\b…\b`: `_` is a word char, so `\bpager\b` matches `pager` only, NOT
+# `draw_pager`; `\bis_terminal\b` matches `is_terminal` only.
+exclude_re = ["\\bpager\\b", "\\bis_terminal\\b"]

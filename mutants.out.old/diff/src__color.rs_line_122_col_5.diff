@@ -1,0 +1,21 @@
+--- src/color.rs
++++ replace for_stream -> ColorMode with Default::default()
+@@ -114,17 +114,17 @@
+     }
+     // 6/7. Palette depth from COLORTERM/TERM, else Ansi16.
+     palette_depth(env)
+ }
+ 
+ /// Real wrapper: resolve for one stream using its actual `IsTerminal`.
+ #[must_use]
+ pub fn for_stream(flag: ColorFlag, env: &Env, stream: Stream) -> ColorMode {
+-    resolve(flag, env, is_terminal(stream))
++    Default::default() /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+ 
+     fn env() -> Env {
+         Env {

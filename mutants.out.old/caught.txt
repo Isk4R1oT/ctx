@@ -1,0 +1,5 @@
+src/lib.rs:38:5: replace run_app -> Result<i32> with Ok(0)
+src/lib.rs:38:5: replace run_app -> Result<i32> with Ok(1)
+src/lib.rs:38:5: replace run_app -> Result<i32> with Ok(-1)
+src/color.rs:39:5: replace is_terminal -> bool with true
+src/render.rs:59:5: replace verbatim_header -> std::io::Result<()> with Ok(())
