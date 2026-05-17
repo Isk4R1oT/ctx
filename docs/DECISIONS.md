@@ -107,5 +107,12 @@ pick"; and the global rule "uncertain + consequential → ask first"):
 "Zero code today" cannot coexist with "F0 built to cargo-green + two-provider wire
 capture + snapshot tests + `/rust-harden` go + `/rust-new` scaffold". Gate R (this
 file) is satisfied **docs-only** under either reading and is done. The F0 scope-for-today
-decision is put to the user before any `.rs` file is created. Resolution will be appended
-here.
+decision is put to the user before any `.rs` file is created.
+
+### Resolution (2026-05-17, user decision via AskUserQuestion): **BUILD F0 NOW.**
+
+"Zero code today" is treated as a **stale clause** carried from the prior design-only
+project status (`../../CLAUDE.md`: "Status: design only. ZERO code written … Next phase
+= implementation"). The binding intent for this session is the detailed F0 EXIT
+criteria: execute R→F0 via the rust-cc compiler-truth loop to **real** `cargo`-green.
+All other HARD INVARIANTS remain in force unchanged. No contradiction remains open.
