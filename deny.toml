@@ -1,0 +1,35 @@
+# cargo-deny policy. `ctx` is a permissive single-binary OSS tool; the
+# allow-list is exactly the standard permissive OSI licenses present in
+# the dependency tree (verified via `cargo deny check licenses`). This is
+# the project's first policy file — it states an honest allow-list, it
+# does not weaken a prior one.
+
+[licenses]
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "Unlicense",
+    "BSL-1.0",
+    # The Mozilla CA root bundle (webpki-root-certs) ships under CDLA —
+    # a permissive data license; required for HTTPS to real providers.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"   # transitive dup minor versions are not a defect
+wildcards = "deny"            # we pin via Cargo's resolver, never `*`
+
+[advisories]
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
