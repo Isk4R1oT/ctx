@@ -2278,4 +2278,73 @@ mod tests {
             "a flat (non-growing) session has a measured slope of exactly 0"
         );
     }
+
+    // --- C5 (D-015) non-text-payload weight attribution ----------------
+
+    #[test]
+    #[ignore = "C5/D-015 red-first: non-text-payload not implemented at the test commit; un-ignored at the impl commit (the D-011/D-014 commit-gate-green pattern)"]
+    fn non_text_payload_fires_and_is_a_distinct_component_not_silent_history() {
+        // A real OpenAI-shaped chat.completions body with a base64 image
+        // content-part (a tiny 1x1 PNG data URI). The payload bytes must
+        // be attributed to a DISTINCT `non-text-payload` component +
+        // indictment, NOT silently inflate `history`.
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let mut img = Timeline::new();
+        let body = format!(
+            r#"{{"model":"gpt-4o","messages":[{{"role":"user","content":[{{"type":"text","text":"what is in this image, described at some reasonable length"}},{{"type":"image_url","image_url":{{"url":"data:image/png;base64,{png}"}}}}]}}]}}"#
+        );
+        img.record_request("POST", "/v1/chat/completions", &[], body.as_bytes());
+
+        let c = compose(&img, false);
+        assert!(
+            c.components.iter().any(|p| p.label == "non-text-payload"),
+            "inline image bytes MUST be a distinct `non-text-payload` component, not silently in history: {:?}",
+            c.components.iter().map(|p| p.label.as_str()).collect::<Vec<_>>()
+        );
+        let nt = c
+            .indictments
+            .iter()
+            .find(|i| i.code == "non-text-payload")
+            .expect("a non-text payload MUST raise the `non-text-payload` indictment");
+        assert!(
+            nt.detail.contains("block") && nt.detail.contains("byte"),
+            "detail must report block count + bytes: {}",
+            nt.detail
+        );
+        assert!(
+            nt.detail.contains('%'),
+            "detail must report the percent of the assembled body: {}",
+            nt.detail
+        );
+        // PURE: byte-attribution FACT, never a token-waste class.
+        assert!(
+            nt.wasted_tokens == 0,
+            "non-text-payload is a byte-attribution FACT, not a token-waste class: wasted_tokens must be 0, got {}",
+            nt.wasted_tokens
+        );
+
+        // CONTROL — a text-only body of comparable size must NOT raise it
+        // (correctly ABSENT/zero, the C2/C4 silent-on-text discipline).
+        let mut txt = Timeline::new();
+        txt.record_request(
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            br#"{"model":"gpt-4o","messages":[{"role":"user","content":[{"type":"text","text":"a purely textual user message of a reasonable, comparable length here for the control case"}]}]}"#,
+        );
+        assert!(
+            !compose(&txt, false)
+                .indictments
+                .iter()
+                .any(|i| i.code == "non-text-payload"),
+            "a text-only body MUST NOT raise non-text-payload"
+        );
+        assert!(
+            !compose(&txt, false)
+                .components
+                .iter()
+                .any(|p| p.label == "non-text-payload"),
+            "a text-only body MUST NOT add a non-text-payload component"
+        );
+    }
 }
