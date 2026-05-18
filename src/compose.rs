@@ -1057,6 +1057,131 @@ mod tests {
         assert_eq!(common_suffix_len(" café", "  fé", 10), 3); // 'f'+'é'(2B)
     }
 
+    // C2 (D-011) — component-drift. PURE MEASUREMENT and the OPPOSITE of
+    // `preamble-repay`: a same-NAMED component (the `system` block, or a
+    // tool keyed by its name) whose bytes/size CHANGE between two of its
+    // appearances mid-session. Hash/size equality + step index + delta;
+    // NO judgment, NO "the model will forget X" (evalint KILLED). A tool
+    // rename reads as remove+add (NOT a drift event — drift requires the
+    // SAME name) — asserted here, stated in `detail`/`--deep`.
+    #[test]
+    #[ignore = "C2/D-011 TDD red: un-ignored in the impl commit (proven failing on HEAD)"]
+    fn component_drift_fires_only_when_a_same_named_component_mutates() {
+        // FIRES — system mutates between step 0 and step 1 (same key
+        // "system", different bytes). Tools stable.
+        let mut sys_drift = Timeline::new();
+        sys_drift.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"You are a careful assistant. Rule A applies.","messages":[{"role":"user","content":"a reasonably long first user question here"}]}"#,
+        );
+        sys_drift.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"You are a careful assistant. Rule B applies now.","messages":[{"role":"user","content":"a reasonably long second user question here"}]}"#,
+        );
+        assert!(
+            has_code(&sys_drift, "component-drift"),
+            "a mutated system block across steps MUST be indicted"
+        );
+        let d = compose(&sys_drift, false)
+            .indictments
+            .into_iter()
+            .find(|i| i.code == "component-drift")
+            .unwrap();
+        assert!(
+            d.detail.contains("system"),
+            "detail must name the drifted component: {}",
+            d.detail
+        );
+        assert!(
+            d.detail.contains("step 1"),
+            "detail must report the step index where it changed: {}",
+            d.detail
+        );
+        assert!(
+            d.wasted_tokens > 0,
+            "a real byte change must report a non-zero token delta"
+        );
+
+        // FIRES — a tool's schema mutates while its NAME is unchanged
+        // (the #1 silent cache-invalidation cause). System stable.
+        let mut tool_drift = Timeline::new();
+        tool_drift.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"stable system prompt of a reasonable length here","messages":[{"role":"user","content":"a reasonably long question"}],"tools":[{"name":"search","input_schema":{"type":"object"}}]}"#,
+        );
+        tool_drift.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"stable system prompt of a reasonable length here","messages":[{"role":"user","content":"a reasonably long question"}],"tools":[{"name":"search","input_schema":{"type":"object","properties":{"q":{"type":"string"},"k":{"type":"number"},"deep":{"type":"boolean"}},"required":["q"]}}]}"#,
+        );
+        assert!(
+            has_code(&tool_drift, "component-drift"),
+            "a same-named tool whose schema mutates MUST be indicted"
+        );
+        assert!(
+            compose(&tool_drift, false)
+                .indictments
+                .iter()
+                .find(|i| i.code == "component-drift")
+                .unwrap()
+                .detail
+                .contains("tool:search"),
+            "detail must name the drifted tool by its key"
+        );
+
+        // NOT FIRES — fully stable system + stable tools across 2 steps
+        // (this is exactly the `preamble-repay` case: identical re-payment,
+        // the OPPOSITE failure — C2 must stay silent here).
+        let mut stable = Timeline::new();
+        let stable_body = br#"{"model":"m","system":"You are a careful, terse assistant for the stable case.","messages":[{"role":"user","content":"a reasonably long first user question here"}],"tools":[{"name":"search","input_schema":{"type":"object"}}]}"#;
+        stable.record_request("POST", "/v1/messages", &[], stable_body);
+        stable.record_request("POST", "/v1/messages", &[], stable_body);
+        assert!(
+            !has_code(&stable, "component-drift"),
+            "an identical re-paid component is preamble-repay, NOT drift"
+        );
+
+        // NOT FIRES — a renamed tool reads as remove+add, never a drift
+        // event (drift requires the SAME name to change its bytes).
+        let mut renamed = Timeline::new();
+        renamed.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"stable system prompt of a reasonable length here","messages":[{"role":"user","content":"a reasonably long question"}],"tools":[{"name":"search_v1","input_schema":{"type":"object"}}]}"#,
+        );
+        renamed.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"stable system prompt of a reasonable length here","messages":[{"role":"user","content":"a reasonably long question"}],"tools":[{"name":"search_v2","input_schema":{"type":"object","properties":{"x":{"type":"string"}}}}]}"#,
+        );
+        assert!(
+            !has_code(&renamed, "component-drift"),
+            "a renamed tool is remove+add, not a same-name drift"
+        );
+
+        // NOT FIRES — a single step cannot drift (needs >=2 appearances).
+        let mut one = Timeline::new();
+        one.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"a single-step system prompt of reasonable length","messages":[{"role":"user","content":"only one step here"}]}"#,
+        );
+        assert!(
+            !has_code(&one, "component-drift"),
+            "one appearance cannot drift"
+        );
+    }
+
     // C1 (D-010) — cache-prefix-break. PURE MEASUREMENT: a short
     // identical leading prefix across consecutive same-provider+model
     // requests while a LARGE identical suffix proves the same context
