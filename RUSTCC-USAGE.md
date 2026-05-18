@@ -373,3 +373,28 @@
   tokenizer sums + integer compares; per provider+model; no prediction
   of provider cache behaviour (evalint stays KILLED). Harden/mutants
   in the next commit.
+
+---
+
+## C1 / D-010 — HARDEN (0 missed on a real baseline) + honest record
+
+- cargo-mutants `--in-diff` on the C1 surface:
+  - Run 1: baseline `ok 28s build + 7s test` (REAL), 37 mutants →
+    **8 MISSED** in `indict_cache_prefix_break` (`||`→`&&`; `<`→`==`/
+    `<=` boundary; compound `&&`; `<` worst-tracking). NOT accepted.
+    Fixed BY CONSTRUCTION + exact pins: decision extracted to a pure
+    `cache_break_wasted(prefix,suffix,total)` with sequential guards
+    and a deterministic exact-boundary unit table (the approx tokenizer
+    cannot hit those boundaries via compose()); provider+model gate
+    collapsed to one `(provider,model)`-key match (no `||`); worst pair
+    via std `min_by_key` (no hand `<`).
+  - Run 2: baseline `ok 27s build + 7s test` (REAL), 33 mutants →
+    **30 caught, 3 unviable, 0 MISSED**.
+- `just check` 0; `just test` **109/109**; `cargo deny`/`machete` ok
+  (C1 added no deps). Behavior preserved across the refactor (the C1
+  fires/silent e2e + pin tests stay green).
+- PROJECT.md §6 indictment list updated (versioned-ruleset seam);
+  D-010 records the rule, the bounded honest claim, the honest limits
+  (byte-prefix identity ≠ a provider-cache guarantee; ±N% tokenizer;
+  shared-suffix gate is a deliberate true-positive bias / honest
+  false-negative), and that evalint stays KILLED. No false green.

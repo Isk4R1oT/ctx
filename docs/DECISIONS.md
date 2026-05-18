@@ -456,3 +456,59 @@ substituted by an in-thread tool-grounded self-review (pure / total /
 panic-free / shared-bound / byte-identical-clean) — deliberately NOT
 subagent-delegated (D-008 integrity incident). Recorded as a
 substitution, not an independent SHIP.
+
+## D-010 — C1: cache-prefix-break, a new pure-measurement F1 indictment (2026-05-18)
+
+### Status: LOCKED. Additive (the PROJECT.md §8 "versioned indictment ruleset" seam). Does not relitigate D-001..D-009; evalint stays KILLED.
+
+**Why.** Prompt-prefix caching (Anthropic `cache_control`, OpenAI
+automatic prefix cache) is a large real cost lever, and the *cause* of
+a cache miss is a request-prefix byte divergence. Every incumbent reads
+the response `usage` object (a billed, post-hoc outcome); none surface
+the byte-level cause, because their SDK→DB→dashboard architecture has
+no verbatim per-step request timeline. `ctx` already holds both bodies
+byte-exact — this deepens the exact locked moat (composition+waste ∩
+per-step diff ∩ zero-config wire capture), not drifts from it.
+Corroborated by the independent research artifact
+`docs/CONTEXT-SIGNALS-RESEARCH.md` (ranked C1 highest).
+
+**Rule (pure measurement).** `indict_cache_prefix_break`: over
+consecutive requests with the SAME (provider, model), measure the
+common byte **prefix** and common byte **suffix** of the verbatim wire
+bodies (char-boundary safe); fire only when the prompt is non-trivial
+(`>= CACHE_MIN_PROMPT_TOKENS` 256), a large identical suffix proves the
+same continuing context (`>= CACHE_MIN_SHARED_SUFFIX_TOKENS` 64), AND
+the cacheable prefix is < half the prompt. `wasted_tokens` = the
+re-sent tokens past the break. Strictly counts/bytes/tokenizer-sums/
+integer compares — NO prediction of whether the provider will cache,
+NO judge (evalint KILLED). Provider-specific cache mechanics (Anthropic
+breakpoint placement, OpenAI's 1024-token minimum) are documentation /
+`--deep` context, never the headline.
+
+**Honest limits (recorded, not buried).** It measures byte-prefix
+identity across consecutive same-(provider,model) requests — NOT a
+guarantee the provider will/won't cache. Tokenizer is the offline ±N%
+approximation. Request-only; needs >=2 same-namespace steps. The
+shared-suffix gate biases to true-positives: a real break where the
+suffix ALSO changed is a deliberate honest false-negative (under-claims
+rather than over-claims). Unknown/changed provider or model ⇒ different
+namespace ⇒ never flagged.
+
+**Gates (real, non-vacuous).** TDD red-first (failing compose.rs test
+proven on `19247ac` predecessor before impl). Compiler-truth fixed
+E0689. `just check` clippy `-D warnings` 0; `just test` **109/109**;
+`cargo deny`/`machete` ok (no new deps). cargo-mutants `--in-diff` on
+the C1 surface: run 1 = **8 missed** on a REAL baseline (`ok 28s build
++ 7s test`) — NOT accepted; the decision was extracted into the pure
+`cache_break_wasted` helper with exact-boundary unit pins (the approx
+tokenizer cannot reach these boundaries through `compose()`), the
+compound `&&` split into sequential guards, the provider/model gate
+collapsed to one `(provider,model)`-key match (removed the `||`), and
+worst-tracking moved to std `min_by_key` (removed the hand `<`). Run 2
+= **30 caught, 3 unviable, 0 missed** on a REAL baseline (`ok 27s build
++ 7s test`). Real e2e: a real 2-turn `ctx run` — a volatile session-id
+prepended to the system prompt ⇒ fires (`wasted=796, ~21/~817 tok
+prefix`); an identical stable prefix ⇒ correctly SILENT. `/rust-review`
+substituted by in-thread tool-grounded self-review (pure / total /
+char-safe / true-positive-gated) — deliberately NOT subagent-delegated
+(D-008 incident). Recorded as a substitution, not an independent SHIP.

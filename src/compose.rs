@@ -250,54 +250,67 @@ fn common_suffix_len(a: &str, b: &str, cap: usize) -> usize {
 /// normalized view. Strictly PURE MEASUREMENT: byte-prefix/suffix
 /// lengths + tokenizer sums + integer comparisons — no prediction of
 /// whether the provider will cache (evalint KILLED).
+/// Pure decision for ONE turn-pair: given the already-counted prefix /
+/// shared-suffix / total tokens, the re-sent (uncacheable) cost iff
+/// this is a genuine early break, else `None`. Sequential guards (no
+/// compound boolean to flip); each threshold is unit-pinned at its
+/// exact boundary — the approximate tokenizer cannot hit these
+/// boundaries through `compose()`, so the decision is isolated here.
+fn cache_break_wasted(prefix_tok: usize, suffix_tok: usize, total_tok: usize) -> Option<usize> {
+    if total_tok < CACHE_MIN_PROMPT_TOKENS {
+        return None; // prompt too small for prefix caching to matter
+    }
+    if suffix_tok < CACHE_MIN_SHARED_SUFFIX_TOKENS {
+        return None; // not clearly the same continuing context
+    }
+    if prefix_tok.saturating_mul(2) >= total_tok {
+        return None; // the cacheable prefix is >= half ⇒ healthy
+    }
+    Some(total_tok.saturating_sub(prefix_tok))
+}
+
 fn indict_cache_prefix_break(timeline: &Timeline) -> Option<Indictment> {
-    let model_of = |s: &crate::timeline::Step| {
-        s.assembled
-            .as_ref()
-            .and_then(|a| a.model.clone())
+    // Cache namespace = (provider, model). Only a KNOWN, unchanged
+    // namespace across consecutive turns can have a broken prefix; an
+    // unknown or changed one is a different namespace, never a break.
+    let key = |s: &crate::timeline::Step| match (
+        s.provider,
+        s.assembled.as_ref().and_then(|a| a.model.as_deref()),
+    ) {
+        (Some(p), Some(m)) => Some((p, m.to_owned())),
+        _ => None,
     };
-    let mut pairs = 0usize;
-    let mut wasted = Vec::new();
-    let mut worst_prefix = usize::MAX;
-    let mut worst_total = 0usize;
+    let mut breaks: Vec<(usize, usize)> = Vec::new(); // (prefix_tok, total_tok)
+    let mut wasted: Vec<usize> = Vec::new();
     for w in timeline.steps.windows(2) {
         let (a, b) = (&w[0], &w[1]);
-        // Prefix cache is scoped to one provider + model; an unknown or
-        // changed model is a different namespace, never a "break".
-        if a.provider.is_none() || a.provider != b.provider {
-            continue;
-        }
-        match (model_of(a), model_of(b)) {
+        match (key(a), key(b)) {
             (Some(x), Some(y)) if x == y => {}
             _ => continue,
         }
         let (pa, pb) = (a.request.body.as_str(), b.request.body.as_str());
-        let total_tok = crate::tokenizer::count(pb);
-        if total_tok < CACHE_MIN_PROMPT_TOKENS {
-            continue;
-        }
         let cp = common_prefix_len(pa, pb);
         let cap = pa.len().min(pb.len()).saturating_sub(cp);
         let cs = common_suffix_len(pa, pb, cap);
+        let total_tok = crate::tokenizer::count(pb);
         let prefix_tok = crate::tokenizer::count(pb.get(..cp).unwrap_or(""));
         let suffix_tok =
             crate::tokenizer::count(pb.get(pb.len().saturating_sub(cs)..).unwrap_or(""));
-        // Same continuing context (large shared suffix) AND the cacheable
-        // prefix is < half the prompt ⇒ an early break re-sends the tail.
-        if suffix_tok >= CACHE_MIN_SHARED_SUFFIX_TOKENS
-            && prefix_tok.saturating_mul(2) < total_tok
-        {
-            pairs += 1;
-            wasted.push(total_tok.saturating_sub(prefix_tok));
-            if prefix_tok < worst_prefix {
-                worst_prefix = prefix_tok;
-                worst_total = total_tok;
-            }
+        if let Some(w) = cache_break_wasted(prefix_tok, suffix_tok, total_tok) {
+            breaks.push((prefix_tok, total_tok));
+            wasted.push(w);
         }
     }
+    let pairs = wasted.len();
     if pairs == 0 {
         return None;
     }
+    // `min_by_key` (std) — no hand-written comparison for a mutant to flip.
+    let (worst_prefix, worst_total) = breaks
+        .iter()
+        .min_by_key(|(p, _)| *p)
+        .copied()
+        .unwrap_or((0, 0));
     Some(Indictment {
         code: "cache-prefix-break".to_string(),
         detail: format!(
@@ -918,6 +931,51 @@ mod tests {
 
     fn has_code(t: &Timeline, code: &str) -> bool {
         compose(t, false).indictments.iter().any(|i| i.code == code)
+    }
+
+    #[test]
+    fn cache_prefix_gates_are_the_documented_constants() {
+        // `black_box` keeps these real runtime checks (not const-folded)
+        // — pins the `*`/literal mutants on the C1 gate constants, same
+        // discipline as `MAX_DECOMPRESSED` / `proxy::MAX_BODY`.
+        assert_eq!(std::hint::black_box(CACHE_MIN_PROMPT_TOKENS), 256);
+        assert_eq!(std::hint::black_box(CACHE_MIN_SHARED_SUFFIX_TOKENS), 64);
+    }
+
+    #[test]
+    fn cache_break_wasted_exact_boundaries() {
+        // Deterministic exact-value table — the approximate tokenizer
+        // cannot hit these boundaries through compose(), so the decision
+        // is pinned here. Each row kills a specific mutant on the gates.
+        // total < MIN ⇒ None; == MIN proceeds (kills `<`→`==`/`<=`):
+        assert_eq!(cache_break_wasted(8, 64, 256), Some(248));
+        assert_eq!(cache_break_wasted(8, 64, 255), None);
+        // suffix < MIN ⇒ None (== MIN already proven to fire above):
+        assert_eq!(cache_break_wasted(8, 63, 256), None);
+        // prefix*2 vs total: exact half ⇒ healthy(None); just-under ⇒ fires:
+        assert_eq!(cache_break_wasted(128, 999, 256), None); // 256>=256
+        assert_eq!(cache_break_wasted(127, 999, 256), Some(129)); // 254<256
+        assert_eq!(cache_break_wasted(200, 999, 256), None); // >  (kills >=→==/<=/<)
+        assert_eq!(cache_break_wasted(130, 999, 256), None); // 260>=256 (kills *→+: 132<256)
+        assert_eq!(cache_break_wasted(86, 999, 256), Some(170)); // 172<256 (kills *2→*3: 258>=256)
+        // saturating: no panic / wrap at the extreme.
+        assert_eq!(cache_break_wasted(usize::MAX, 64, 256), None);
+    }
+
+    #[test]
+    fn common_prefix_and_suffix_len_are_exact_and_char_safe() {
+        assert_eq!(common_prefix_len("abcXY", "abcZZ"), 3);
+        assert_eq!(common_prefix_len("same", "same"), 4);
+        assert_eq!(common_prefix_len("", "x"), 0);
+        assert_eq!(common_prefix_len("xyz", "abc"), 0);
+        // multi-byte: stop on the differing char, never mid-codepoint.
+        assert_eq!(common_prefix_len("héllo", "héXlo"), 3); // 'h' + 'é'(2B)
+        // suffix, capped so it can never overlap the prefix region.
+        assert_eq!(common_suffix_len("abcTAIL", "zzzTAIL", 4), 4);
+        assert_eq!(common_suffix_len("abcTAIL", "zzzTAIL", 2), 2); // cap binds
+        assert_eq!(common_suffix_len("abc", "abc", 100), 3);
+        assert_eq!(common_suffix_len("abc", "xyz", 100), 0);
+        assert_eq!(common_suffix_len(" café", "  fé", 10), 3); // 'f'+'é'(2B)
     }
 
     // C1 (D-010) — cache-prefix-break. PURE MEASUREMENT: a short
