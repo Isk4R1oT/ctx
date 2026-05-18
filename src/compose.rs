@@ -163,6 +163,25 @@ const CACHE_MIN_PROMPT_TOKENS: usize = 256;
 /// the rule true-positive-only.
 const CACHE_MIN_SHARED_SUFFIX_TOKENS: usize = 64;
 
+/// C7 (D-016) — request-header facts tracked for `header-drift`. The
+/// determinism/identity headers SDK abstractions hide; lower-cased
+/// match (HTTP header names are case-insensitive). NONE is in
+/// `timeline::SENSITIVE`, so the value is the real wire value, never a
+/// secret (auth/api-key/cookie are already `REDACTED` on capture).
+/// LIVE-ONLY: `store.rs` does not persist request headers (D-009), so
+/// `ctx open` of a saved session has none and `header-drift` honestly
+/// stays silent (never fabricated). A full post-hoc C7 needs a
+/// store.rs header-allowlist persistence — a shared F0-substrate change
+/// (co-owned by agentlock/guard), DEFERRED by decision (see D-016);
+/// this is the recorded extension point.
+const TRACKED_HEADERS: &[&str] = &[
+    "anthropic-version",
+    "anthropic-beta",
+    "openai-beta",
+    "content-encoding",
+    "accept-encoding",
+];
+
 /// Saturating sum. Waste math runs on attacker-influenced wire bytes
 /// (`ctx open` reads an unbounded saved session); it must never panic in
 /// debug nor silently wrap in release — that would turn a "pure
@@ -435,6 +454,7 @@ fn indict(timeline: &Timeline) -> Vec<Indictment> {
         indict_component_drift(timeline),
         indict_param_drift(timeline),
         indict_non_text_payload(timeline),
+        indict_header_drift(timeline),
     ]
     .into_iter()
     .flatten()
@@ -1002,6 +1022,79 @@ fn indict_param_drift(timeline: &Timeline) -> Option<Indictment> {
         ),
         // A param change re-bills no prompt tokens — it is a determinism
         // fact, not a token-waste class. `0` (never a fabricated cost).
+        wasted_tokens: 0,
+    })
+}
+
+/// C7 (D-016) — `header-drift`, LIVE-ONLY. A tracked request-header
+/// (`TRACKED_HEADERS`: anthropic-version/-beta, openai-beta,
+/// content-encoding, accept-encoding) whose value changes across
+/// same-(provider,model) turns — SDK abstractions hide these; only the
+/// wire shows them. Structurally identical to C4 `param-drift` (reuses
+/// the pure `param_change` + the `step_namespace` tuple gate), just
+/// sourced from `step.request.headers` (header names are
+/// case-insensitive ⇒ lower-cased; auth/api-key/cookie are already
+/// `REDACTED` on capture ⇒ no secret surfaced; a tracked header that is
+/// `REDACTED` in BOTH turns simply never drifts). PURE MEASUREMENT:
+/// value (in)equality + step index; a reported determinism-surface
+/// fact, NEVER a non-determinism claim (evalint KILLED). LIVE-ONLY:
+/// `store.rs` does not persist request headers (D-009) so a post-hoc
+/// `ctx open` has none and this honestly degrades to SILENCE (never
+/// fabricated). Full post-hoc C7 = a store.rs header-allowlist
+/// persistence (shared F0 substrate, co-owned by agentlock/guard),
+/// DEFERRED by decision — the recorded extension point (D-016).
+fn indict_header_drift(timeline: &Timeline) -> Option<Indictment> {
+    // First "header@step ix (old->new)" per tracked header, BTreeMap ⇒
+    // deterministic ordering (the C2/C4 first-event discipline).
+    let mut first_event: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let tracked = |name: &str| -> Option<String> {
+        let lc = name.to_ascii_lowercase();
+        TRACKED_HEADERS.contains(&lc.as_str()).then_some(lc)
+    };
+    for w in timeline.steps.windows(2) {
+        let (a, b) = (&w[0], &w[1]);
+        // Same (provider, model) namespace only — ONE tuple equality
+        // (no `&&` for a mutant to widen into `||`).
+        match (step_namespace(a), step_namespace(b)) {
+            (Some(x), Some(y)) if x == y => {}
+            _ => continue,
+        }
+        // A header is compared only when the tracked name is PRESENT in
+        // BOTH turns (`absent != a value`, the C4 honest semantics).
+        let prev: std::collections::BTreeMap<String, &str> = a
+            .request
+            .headers
+            .iter()
+            .filter_map(|(k, v)| tracked(k).map(|lc| (lc, v.as_str())))
+            .collect();
+        for (k, cur) in &b.request.headers {
+            let Some(lc) = tracked(k) else { continue };
+            if let Some(old) = prev.get(&lc) {
+                if let Some((f, o, n)) = param_change(&lc, old, cur) {
+                    first_event
+                        .entry(f.clone())
+                        .or_insert_with(|| format!("{f}@step {} ({o}->{n})", b.index));
+                }
+            }
+        }
+    }
+    if first_event.is_empty() {
+        return None;
+    }
+    let events = first_event
+        .values()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(Indictment {
+        code: "header-drift".to_string(),
+        detail: format!(
+            "{} request-header fact(s) changed mid-session (same provider+model): {events} (live-only: ctx open of a saved session has no headers, see D-016; a reported determinism-surface fact, not a non-determinism claim)",
+            first_event.len()
+        ),
+        // A header change re-bills no prompt tokens — a determinism
+        // fact, not a token-waste class (mirrors C4's hard-`0`).
         wasted_tokens: 0,
     })
 }
@@ -2576,7 +2669,24 @@ mod tests {
     // a full post-hoc C7 needs a store.rs header-allowlist persistence
     // (shared F0 substrate, deferred — see D-016).
     #[test]
-    #[ignore = "C7/D-016 red-first: header-drift not implemented at the test commit; un-ignored at the impl commit (the D-010/C4 commit-gate-green pattern)"]
+    fn tracked_headers_are_the_documented_set() {
+        // `black_box` keeps this a real runtime check (not const-folded)
+        // — pins the tracked-header set (same discipline as C4
+        // SAMPLING_FIELDS / C5 NON_TEXT_KINDS).
+        let h = std::hint::black_box(TRACKED_HEADERS);
+        assert_eq!(
+            h,
+            &[
+                "anthropic-version",
+                "anthropic-beta",
+                "openai-beta",
+                "content-encoding",
+                "accept-encoding"
+            ]
+        );
+    }
+
+    #[test]
     fn header_drift_fires_on_a_tracked_header_change_same_namespace() {
         let body = br#"{"model":"claude-x","messages":[{"role":"user","content":"a reasonably long question for the header drift fixture"}]}"#;
         // Same (provider, model); a tracked header (anthropic-beta)
@@ -2620,6 +2730,66 @@ mod tests {
         assert!(
             !has_code(&posthoc, "header-drift"),
             "no captured headers (post-hoc) ⇒ header-drift must be SILENT, never fabricated"
+        );
+
+        // Case-insensitive header name (HTTP names are case-insensitive)
+        // ⇒ a mixed-case tracked header still drifts.
+        let mut ci = Timeline::new();
+        ci.record_request(
+            "POST",
+            "/v1/messages",
+            &[("Anthropic-Beta".to_string(), "x".to_string())],
+            body,
+        );
+        ci.record_request(
+            "POST",
+            "/v1/messages",
+            &[("ANTHROPIC-BETA".to_string(), "y".to_string())],
+            body,
+        );
+        assert!(
+            has_code(&ci, "header-drift"),
+            "tracked header match must be case-insensitive"
+        );
+
+        // An UNTRACKED header changing ⇒ NOT indicted (only the tracked
+        // determinism set, never arbitrary request headers).
+        let mut untr = Timeline::new();
+        untr.record_request(
+            "POST",
+            "/v1/messages",
+            &[("x-request-id".to_string(), "r1".to_string())],
+            body,
+        );
+        untr.record_request(
+            "POST",
+            "/v1/messages",
+            &[("x-request-id".to_string(), "r2".to_string())],
+            body,
+        );
+        assert!(
+            !has_code(&untr, "header-drift"),
+            "an untracked header must NOT drift (tracked set only)"
+        );
+
+        // Different model = different determinism surface ⇒ silent
+        // (the step_namespace gate, the agentlock-boundary caveat).
+        let mut dm = Timeline::new();
+        dm.record_request(
+            "POST",
+            "/v1/messages",
+            &[("anthropic-beta".to_string(), "a".to_string())],
+            br#"{"model":"claude-x","messages":[{"role":"user","content":"a reasonably long question one"}]}"#,
+        );
+        dm.record_request(
+            "POST",
+            "/v1/messages",
+            &[("anthropic-beta".to_string(), "b".to_string())],
+            br#"{"model":"claude-y","messages":[{"role":"user","content":"a reasonably long question two"}]}"#,
+        );
+        assert!(
+            !has_code(&dm, "header-drift"),
+            "a different model is a different namespace — not a header drift"
         );
     }
 }
