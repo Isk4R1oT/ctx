@@ -472,3 +472,55 @@ async fn run_requires_a_child_command() {
     // clap rejects a missing required `-- <CMD>` with a non-zero exit.
     assert!(!out.status.success());
 }
+
+// P1 / D-017 — root-cause fix: the upstream base PATH must be preserved
+// verbatim. A subpath upstream (OpenRouter `…/api/v1`, Azure
+// `…/openai/deployments/…`, any sub-path gateway) MUST forward
+// correctly with NO `CTX_UPSTREAM`/client `/api/v1` hack. On HEAD
+// `origin_of` strips the path → forward misses → upstream != 200.
+// MUST fail pre-fix, pass post-fix. `#[ignore]` keeps the commit-gate
+// green at the red commit (un-ignored at the P1 fix commit).
+#[tokio::test]
+#[ignore = "P1/D-017 red: origin_of strips the upstream subpath; un-ignored at the P1 fix commit"]
+async fn forwards_verbatim_to_a_subpath_upstream() {
+    // An OpenRouter-shaped upstream: the real base carries `/api/v1`.
+    let openrouter = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"or"})))
+        .mount(&openrouter)
+        .await;
+
+    // The client posts the OpenAI-SDK-conventional path relative to the
+    // proxy base ctx injects — no `/api/v1` knowledge in the client.
+    let script = format!(
+        "curl -s -o /dev/null -X POST \"$OPENAI_BASE_URL/chat/completions\" \
+            -H 'content-type: application/json' -H 'authorization: Bearer secret' -d '{OPENAI_BODY}'"
+    );
+
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .args(["run", "--json", "--", "sh", "-c", &script])
+        // The real upstream base WITH its `/api/v1` sub-path.
+        .env("CTX_UPSTREAM_OPENAI", format!("{}/api/v1", openrouter.uri()))
+        .env("NO_COLOR", "1")
+        .output()
+        .await
+        .expect("spawn ctx binary");
+
+    assert!(
+        out.status.success(),
+        "ctx exited non-zero; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tl: Value = serde_json::from_slice(&out.stdout).expect("ctx --json valid JSON");
+    let steps = tl["steps"].as_array().expect("steps array");
+    assert_eq!(steps.len(), 1, "one captured request");
+    assert_eq!(steps[0]["provider"], "open_ai_compat");
+    // ctx injects the proxy ROOT (no synthetic /v1) ⇒ the captured path
+    // is exactly what the client sent.
+    assert_eq!(steps[0]["request"]["path"], "/chat/completions");
+    assert_eq!(
+        steps[0]["response"]["status"], 200,
+        "the subpath upstream `/api/v1/chat/completions` MUST be hit verbatim (no path stripping)"
+    );
+}
