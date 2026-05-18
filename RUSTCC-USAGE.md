@@ -327,3 +327,26 @@
   (`system·tool-schemas·history` + unused-tools indictment), NOT
   Layer-2; `ctx open` round-trips each. $0 (natural /v1 path 404s
   upstream; request captured+decoded before forward).
+
+---
+
+## D-009 follow-up — multi-codec HARDEN (0 missed on a real baseline)
+
+- cargo-mutants `--in-diff` on the full multi-codec timeline.rs surface:
+  - Run 1: baseline `ok 22s build + 5s test` (REAL), 46 mutants →
+    **1 MISSED** `timeline.rs:80 replace | with ^` in `magic_codec`.
+    Analyzed, NOT papered over: it is a provably EQUIVALENT mutant
+    (`(b0<<8)|b1` ≡ `(b0<<8)^b1` because `b0<<8` zeroes the low byte ⇒
+    disjoint bits ⇒ no input distinguishes them; no test can kill it).
+    Per the step-D technique, eliminated BY CONSTRUCTION:
+    `u16::from_be_bytes([*b0,*b1])` (no shift/or operator left to flip).
+  - Run 2: baseline `ok 21s build + 5s test` (REAL), 43 mutants →
+    **41 caught, 2 unviable, 0 MISSED**. `just check`/`just test`
+    105/105 green after the change (`magic_codec` test still passes —
+    `0x789c % 31 == 0` unchanged).
+- `cargo deny` advisories/bans/licenses/sources ok; `cargo machete`
+  no unused deps (ruzstd + brotli-decompressor used). Pure-Rust ⇒
+  single static binary intact.
+- Honest status: REAL fix; equivalent-mutant handled honestly (not
+  accepted, not faked, removed structurally); bounded claim + recorded
+  limits in D-009 follow-up. No false green.

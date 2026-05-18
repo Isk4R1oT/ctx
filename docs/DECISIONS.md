@@ -409,3 +409,50 @@ substituted by a tool-grounded invariant self-review (SHIP, 0 high),
 review subagent hit a usage cap and left a stray file that corrupted
 the mutation baseline) — recorded as a substitution, not an independent
 SHIP.
+
+### D-009 follow-up — multi-codec decode (zstd/brotli/zlib), user-requested defensive extension
+
+The D-009 gzip fix was generalized at the same F0 capture boundary to
+also decode `Content-Encoding: zstd | br | deflate(=zlib)`, on Igor's
+explicit "decode the others too, just in case" request after web
+research. Design: header-primary (`Content-Encoding`, the ONLY signal
+for brotli/raw-deflate — they have no magic — present on the live
+`ctx run` path) + magic-secondary (gzip `1f8b`, zstd `28b52ffd`, zlib
+`CM=8` & the RFC1950 `%31` check — survives the header-less post-hoc
+path). One shared bounded reader applies the SAME `MAX_DECOMPRESSED`
+reject-wholesale bound to every codec; single token only; chained /
+identity / unknown / fallible-init / corrupt / over-limit ⇒ raw kept
+(honest Layer-2); total, panic-free. Pure-Rust deps (single static
+binary preserved): `ruzstd` 0.8.3, `brotli-decompressor` 5.0.0, flate2
+`ZlibDecoder`. Clean JSON matches no codec ⇒ `Cow::Borrowed` ⇒ F0/F2/F3
+byte-identical (zero-regression unchanged).
+
+**Honest real-world caveat (recorded, not buried).** Request-body
+compression is *uncommon* — `Content-Encoding` is mostly a response
+mechanism; gzip-on-request is the only case observed in the wild on a
+real LLM client. zstd/br/deflate-on-request support is defensive, not
+demonstrated-necessary.
+
+**Bounded honest claim (extends §1).** F1 Layer-1 decomposes a real
+`Content-Encoding: gzip | zstd | br | deflate` body — proven by
+per-codec round-trip unit tests, real python-zstandard/brotli fixtures
+(`tests/fixtures/sample_{zstd,brotli}.bin`), AND a fresh real
+end-to-end run of each through `ctx run` (httpx client → F1 decomposes,
+not Layer-2; `ctx open` round-trips). NOT claimed: chained encodings,
+or a true raw-RFC1951-deflate body sent WITHOUT a `Content-Encoding`
+header (no magic, no header ⇒ stays honest Layer-2) — a deliberate,
+recorded limit, no real case exists.
+
+**Gates (real, non-vacuous).** `just check` clippy `-D warnings` 0;
+`just test` 105/105 + doctests; `cargo deny`/`machete` ok (both new
+deps used, advisories/licenses/bans clean); cargo-mutants `--in-diff`
+on the full multi-codec surface: run 1 = **1 missed** (`(b0<<8)|b1`
+`|`→`^` — a provably *equivalent* mutant: `b0<<8` zeroes the low byte
+so `|`≡`^`; no test can distinguish it) ⇒ NOT accepted, eliminated by
+construction via `u16::from_be_bytes` (no shift/or operator remains);
+run 2 = **41 caught, 2 unviable, 0 missed** on a REAL baseline
+(`Unmutated baseline ok 21s build + 5s test`). `/rust-review`
+substituted by an in-thread tool-grounded self-review (pure / total /
+panic-free / shared-bound / byte-identical-clean) — deliberately NOT
+subagent-delegated (D-008 integrity incident). Recorded as a
+substitution, not an independent SHIP.

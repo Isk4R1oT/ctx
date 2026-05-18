@@ -73,11 +73,13 @@ fn magic_codec(body: &[u8]) -> Option<Codec> {
         [0x1f, 0x8b, ..] => Some(Codec::Gzip),
         [0x28, 0xb5, 0x2f, 0xfd, ..] => Some(Codec::Zstd),
         // RFC 1950: low nibble of byte0 = 8 (deflate), and the 16-bit
-        // big-endian (byte0,byte1) is a multiple of 31.
+        // big-endian (byte0,byte1) is a multiple of 31. `from_be_bytes`
+        // (not `<<`|`|`) so there is no shift/or operator for a mutant
+        // to flip into an equivalent (`(b0<<8)|b1 == (b0<<8)^b1`).
         [b0, b1, ..]
             if b0 & 0x0f == 0x08
                 && b0 & 0x80 == 0
-                && ((u16::from(*b0) << 8) | u16::from(*b1)) % 31 == 0 =>
+                && u16::from_be_bytes([*b0, *b1]) % 31 == 0 =>
         {
             Some(Codec::Zlib)
         }
