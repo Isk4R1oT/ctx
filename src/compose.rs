@@ -196,6 +196,27 @@ fn non_text_weight(part_bytes: &[usize], body_bytes: usize) -> Option<(usize, us
     Some((count, total, pct(total, body_bytes)))
 }
 
+/// C5 (D-015) — the deterministic per-kind tally string (e.g.
+/// `"2 image_url, 1 file"`). Walks `NON_TEXT_KINDS` in its FIXED
+/// declaration order (stable, snapshot-friendly — no `BTreeMap` re-sort)
+/// and, per kind, counts the matching parts with `Iterator::count()`.
+/// `count()` is used DELIBERATELY: it has no mutable arithmetic operator
+/// for a mutant to flip (the proven D-010 by-construction elimination —
+/// a hand `+= 1` accumulator's `+=`→`*=` is a no-op for a single block
+/// and was MISSED on pass 1; `filter().count()` removes the operator
+/// entirely). A kind absent from `parts` contributes nothing (the
+/// `> 0` guard) — only kinds actually on the wire appear. Pure.
+fn kind_tally(parts: &[crate::adapter::NonTextPart]) -> String {
+    crate::adapter::NON_TEXT_KINDS
+        .iter()
+        .filter_map(|&kind| {
+            let n = parts.iter().filter(|p| p.kind == kind).count();
+            (n > 0).then(|| format!("{n} {kind}"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Recursively collect tool names the model actually invoked, across
 /// both wire shapes (Anthropic `tool_use` blocks, `OpenAI` `tool_calls`).
 fn collect_used(v: &Value, out: &mut BTreeSet<String>) {
@@ -1020,16 +1041,7 @@ fn indict_non_text_payload(timeline: &Timeline) -> Option<Indictment> {
     let body_bytes = focus.request.body.len();
     let part_bytes: Vec<usize> = parts.iter().map(|p| p.bytes).collect();
     let (count, bytes, percent) = non_text_weight(&part_bytes, body_bytes)?;
-    // Deterministic per-kind tally (BTreeMap ⇒ sorted, like C2/C4).
-    let mut by_kind: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
-    for p in parts {
-        *by_kind.entry(p.kind.as_str()).or_insert(0) += 1;
-    }
-    let kinds = by_kind
-        .iter()
-        .map(|(k, n)| format!("{n} {k}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let kinds = kind_tally(parts);
     Some(Indictment {
         code: "non-text-payload".to_string(),
         detail: format!(
@@ -2423,6 +2435,33 @@ mod tests {
             "non-text-payload is a byte-attribution FACT, not a token-waste class: wasted_tokens must be 0, got {}",
             nt.wasted_tokens
         );
+        assert!(
+            nt.detail.contains("base64 not decoded")
+                && nt.detail.contains("no media token estimate"),
+            "detail must state the strictly-pure regime (base64 not decoded, no token estimate): {}",
+            nt.detail
+        );
+
+        // BOTH WIRE SHAPES + count > 1 (the D-007 dual-provider rule;
+        // pins the per-kind tally COUNT through `compose()` so the
+        // pass-1 `+=`→`*=` class is killed end-to-end, not only in the
+        // helper unit test). Anthropic-shape, TWO image blocks in one
+        // message ⇒ the detail must read "2 image".
+        let mut anth = Timeline::new();
+        let abody = format!(
+            r#"{{"model":"claude-3-5-sonnet-20241022","messages":[{{"role":"user","content":[{{"type":"text","text":"compare these two images for me in reasonable detail please"}},{{"type":"image","source":{{"type":"base64","media_type":"image/png","data":"{png}"}}}},{{"type":"image","source":{{"type":"base64","media_type":"image/png","data":"{png}"}}}}]}}]}}"#
+        );
+        anth.record_request("POST", "/v1/messages", &[], abody.as_bytes());
+        let ant = compose(&anth, false)
+            .indictments
+            .into_iter()
+            .find(|i| i.code == "non-text-payload")
+            .expect("Anthropic-shape image blocks MUST also raise non-text-payload");
+        assert!(
+            ant.detail.contains("2 image") && ant.detail.contains("2 block(s)"),
+            "two Anthropic image blocks must tally as `2 image` / `2 block(s)`: {}",
+            ant.detail
+        );
 
         // CONTROL — a text-only body of comparable size must NOT raise it
         // (correctly ABSENT/zero, the C2/C4 silent-on-text discipline).
@@ -2492,5 +2531,36 @@ mod tests {
         // a zero-byte block still counts as a block (count is structural,
         // not byte-gated — kills a `len()` → byte-filter mutant):
         assert_eq!(non_text_weight(&[0], 100), Some((1, 0, 0)));
+    }
+
+    #[test]
+    fn kind_tally_counts_per_kind_in_fixed_order() {
+        use crate::adapter::NonTextPart;
+        let p = |k: &str| NonTextPart {
+            kind: k.to_string(),
+            bytes: 1,
+        };
+        // empty ⇒ empty string (kills a fabricated-nonempty mutant):
+        assert_eq!(kind_tally(&[]), "");
+        // a single block ⇒ "1 <kind>" (count == 1):
+        assert_eq!(kind_tally(&[p("file")]), "1 file");
+        // TWO blocks of the SAME kind ⇒ "2 image_url" — count is 2, so a
+        // `+=`→`*=` mutant (1*1==1, but 1+1==2) is now KILLED, and a
+        // `count()`→`0`/`1` mutant differs from 2 (the pass-1 fix is
+        // pinned BY a discriminating value, not just by construction):
+        assert_eq!(
+            kind_tally(&[p("image_url"), p("image_url")]),
+            "2 image_url"
+        );
+        // mixed kinds appear in the FIXED `NON_TEXT_KINDS` declaration
+        // order (image, image_url, input_audio, audio, document, file),
+        // NOT input order — a reorder/`BTreeMap`-resort mutant is caught:
+        assert_eq!(
+            kind_tally(&[p("file"), p("image"), p("image"), p("document")]),
+            "2 image, 1 document, 1 file"
+        );
+        // a kind NOT in `NON_TEXT_KINDS` never appears (the membership
+        // discipline; `non_text_of` would not have emitted it anyway):
+        assert_eq!(kind_tally(&[p("text")]), "");
     }
 }
