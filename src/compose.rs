@@ -59,6 +59,20 @@ fn pct(part: usize, total: usize) -> u32 {
 /// shared by the two block rules.
 const MIN_BLOCK_BYTES: usize = 40;
 
+/// C1 (D-010) cache-prefix-break gates. PURE MEASUREMENT thresholds — a
+/// measured fact about prefix reuse, never a prediction of provider
+/// caching behaviour (evalint KILLED; provider-specific cache mechanics
+/// are a `--deep`/doc caveat, not the headline). Tunable, snapshot-
+/// stable (integer-only), `black_box`-pinned in tests.
+///
+/// Below this prompt size, prefix caching is economically irrelevant —
+/// do not indict (avoids noise on small calls).
+const CACHE_MIN_PROMPT_TOKENS: usize = 256;
+/// A shared *suffix* this large proves the two turns are the SAME
+/// continuing context (not two unrelated prompts) — the gate that makes
+/// the rule true-positive-only.
+const CACHE_MIN_SHARED_SUFFIX_TOKENS: usize = 64;
+
 /// Saturating sum. Waste math runs on attacker-influenced wire bytes
 /// (`ctx open` reads an unbounded saved session); it must never panic in
 /// debug nor silently wrap in release — that would turn a "pure
@@ -191,10 +205,106 @@ fn indict(timeline: &Timeline) -> Vec<Indictment> {
         indict_repeated_across_turns(timeline),
         indict_unpruned_history(timeline),
         indict_preamble_repay(timeline),
+        indict_cache_prefix_break(timeline),
     ]
     .into_iter()
     .flatten()
     .collect()
+}
+
+/// Length (bytes) of the longest common leading prefix of two strings,
+/// always returned on a UTF-8 char boundary (char-wise compare).
+fn common_prefix_len(a: &str, b: &str) -> usize {
+    let mut n = 0;
+    for ((ia, ca), (_, cb)) in a.char_indices().zip(b.char_indices()) {
+        if ca != cb {
+            break;
+        }
+        n = ia + ca.len_utf8();
+    }
+    n
+}
+
+/// Length (bytes) of the longest common trailing suffix, char-boundary
+/// safe, capped at `cap` so it can never overlap a counted prefix.
+fn common_suffix_len(a: &str, b: &str, cap: usize) -> usize {
+    let mut n: usize = 0;
+    let mut ai = a.chars().rev();
+    let mut bi = b.chars().rev();
+    while let (Some(x), Some(y)) = (ai.next(), bi.next()) {
+        if x != y || n.saturating_add(x.len_utf8()) > cap {
+            break;
+        }
+        n += x.len_utf8();
+    }
+    n
+}
+
+/// C1 (D-010) — cache-prefix-break. Across consecutive requests to the
+/// **same provider + model**, a short identical leading prefix while a
+/// large identical suffix proves the *same context continues* means the
+/// reusable bulk is re-sent past an early break (a volatile field,
+/// reordered tools, or a regenerated system prompt pushed the stable
+/// content off the cacheable prefix). The substrate is the **verbatim
+/// wire body** (what a prefix cache actually keys on), not the
+/// normalized view. Strictly PURE MEASUREMENT: byte-prefix/suffix
+/// lengths + tokenizer sums + integer comparisons — no prediction of
+/// whether the provider will cache (evalint KILLED).
+fn indict_cache_prefix_break(timeline: &Timeline) -> Option<Indictment> {
+    let model_of = |s: &crate::timeline::Step| {
+        s.assembled
+            .as_ref()
+            .and_then(|a| a.model.clone())
+    };
+    let mut pairs = 0usize;
+    let mut wasted = Vec::new();
+    let mut worst_prefix = usize::MAX;
+    let mut worst_total = 0usize;
+    for w in timeline.steps.windows(2) {
+        let (a, b) = (&w[0], &w[1]);
+        // Prefix cache is scoped to one provider + model; an unknown or
+        // changed model is a different namespace, never a "break".
+        if a.provider.is_none() || a.provider != b.provider {
+            continue;
+        }
+        match (model_of(a), model_of(b)) {
+            (Some(x), Some(y)) if x == y => {}
+            _ => continue,
+        }
+        let (pa, pb) = (a.request.body.as_str(), b.request.body.as_str());
+        let total_tok = crate::tokenizer::count(pb);
+        if total_tok < CACHE_MIN_PROMPT_TOKENS {
+            continue;
+        }
+        let cp = common_prefix_len(pa, pb);
+        let cap = pa.len().min(pb.len()).saturating_sub(cp);
+        let cs = common_suffix_len(pa, pb, cap);
+        let prefix_tok = crate::tokenizer::count(pb.get(..cp).unwrap_or(""));
+        let suffix_tok =
+            crate::tokenizer::count(pb.get(pb.len().saturating_sub(cs)..).unwrap_or(""));
+        // Same continuing context (large shared suffix) AND the cacheable
+        // prefix is < half the prompt ⇒ an early break re-sends the tail.
+        if suffix_tok >= CACHE_MIN_SHARED_SUFFIX_TOKENS
+            && prefix_tok.saturating_mul(2) < total_tok
+        {
+            pairs += 1;
+            wasted.push(total_tok.saturating_sub(prefix_tok));
+            if prefix_tok < worst_prefix {
+                worst_prefix = prefix_tok;
+                worst_total = total_tok;
+            }
+        }
+    }
+    if pairs == 0 {
+        return None;
+    }
+    Some(Indictment {
+        code: "cache-prefix-break".to_string(),
+        detail: format!(
+            "{pairs} turn-pair(s): cacheable prefix broke early (~{worst_prefix} of ~{worst_total} tok shared as prefix) — tail re-sent uncacheable"
+        ),
+        wasted_tokens: sat_sum(wasted.into_iter()),
+    })
 }
 
 /// Tools declared on the wire but never invoked in any response.
@@ -803,6 +913,103 @@ mod tests {
         assert!(
             !has_unpruned(&wobble),
             "non-monotone history must not be indicted"
+        );
+    }
+
+    fn has_code(t: &Timeline, code: &str) -> bool {
+        compose(t, false).indictments.iter().any(|i| i.code == code)
+    }
+
+    // C1 (D-010) — cache-prefix-break. PURE MEASUREMENT: a short
+    // identical leading prefix across consecutive same-provider+model
+    // requests while a LARGE identical suffix proves the same context
+    // continues ⇒ the reusable tail is re-sent past an early break
+    // (a volatile field / reordered tools / regenerated system prompt
+    // pushed the stable content off the cacheable prefix). NOT a
+    // prediction — a measured fact (bytes + tokenizer sum).
+    #[test]
+    fn cache_prefix_break_fires_only_on_early_break_with_large_shared_suffix() {
+        let big_tail = format!(
+            r#","messages":[{{"role":"user","content":"{}"}}]}}"#,
+            "the quick brown fox jumps over the lazy dog ".repeat(40)
+        );
+        let mk = |model: &str, sys_fill: &str| {
+            format!(r#"{{"model":"{model}","system":"{}"{big_tail}"#, sys_fill.repeat(400))
+                .into_bytes()
+        };
+
+        // FIRES: tiny common prefix (system diverges almost immediately),
+        // huge identical suffix (same continuing context), big prompt.
+        let mut brk = Timeline::new();
+        brk.record_request("POST", "/v1/messages", &[], &mk("m", "S"));
+        brk.record_request("POST", "/v1/messages", &[], &mk("m", "Z"));
+        assert!(
+            has_code(&brk, "cache-prefix-break"),
+            "early prefix break with a large shared suffix MUST be indicted"
+        );
+        let w = compose(&brk, false)
+            .indictments
+            .into_iter()
+            .find(|i| i.code == "cache-prefix-break")
+            .unwrap();
+        assert!(w.wasted_tokens > 0, "must report the re-sent broken-tail cost");
+
+        // NOT FIRES — healthy: long identical prefix (stable system +
+        // early messages), conversation only grows at the end.
+        let common = format!(
+            r#"{{"model":"m","system":"{}","messages":[{{"role":"user","content":"{}"#,
+            "S".repeat(400),
+            "x".repeat(1200)
+        );
+        let mut healthy = Timeline::new();
+        healthy.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            format!(r#"{common}"}}]}}"#).as_bytes(),
+        );
+        healthy.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            format!(r#"{common}"}},{{"role":"user","content":"more"}}]}}"#).as_bytes(),
+        );
+        assert!(
+            !has_code(&healthy, "cache-prefix-break"),
+            "a stable prefix that only grows at the end must NOT be indicted"
+        );
+
+        // NOT FIRES — unrelated short prompts (suffix + size gates).
+        let mut unrel = Timeline::new();
+        unrel.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"alpha","messages":[{"role":"user","content":"q1"}]}"#,
+        );
+        unrel.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"beta gamma","messages":[{"role":"user","content":"other"}]}"#,
+        );
+        assert!(
+            !has_code(&unrel, "cache-prefix-break"),
+            "unrelated small prompts must NOT be indicted"
+        );
+
+        // NOT FIRES — single step (needs >=2 same-provider+model).
+        let mut one = Timeline::new();
+        one.record_request("POST", "/v1/messages", &[], &mk("m", "S"));
+        assert!(!has_code(&one, "cache-prefix-break"), "one step cannot break a cache prefix");
+
+        // NOT FIRES — different model (prefix cache is per model).
+        let mut diff_model = Timeline::new();
+        diff_model.record_request("POST", "/v1/messages", &[], &mk("m", "S"));
+        diff_model.record_request("POST", "/v1/messages", &[], &mk("n", "Z"));
+        assert!(
+            !has_code(&diff_model, "cache-prefix-break"),
+            "a different model is a different cache namespace, not a break"
         );
     }
 }

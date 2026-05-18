@@ -350,3 +350,26 @@
 - Honest status: REAL fix; equivalent-mutant handled honestly (not
   accepted, not faked, removed structurally); bounded claim + recorded
   limits in D-009 follow-up. No false green.
+
+---
+
+## C1 / D-010 — cache-prefix-break indictment (new pure-measurement F1 rule)
+
+- TDD: failing compose.rs test FIRST (`cache_prefix_break_fires_only_
+  on_early_break_with_large_shared_suffix`) — proved RED (105 others
+  green) before any impl.
+- Compiler-truth loop: `just check` caught **E0689** (ambiguous numeric
+  `n` in `common_suffix_len`) ⇒ fixed per the compiler's own guidance
+  (`let mut n: usize = 0`). Re-run `just check` clippy `-D warnings` 0.
+- `just test` **106/106, 0 skipped** + doctests — all F0/F1/F2/F3 +
+  decode + step-B green ⇒ purely additive, zero regression.
+- REAL e2e (green ≠ works): a real httpx 2-turn run through `ctx run`
+  — MODE=break (volatile session-id prepended to the system prompt) ⇒
+  `cache-prefix-break wasted=796, ~21 of ~817 tok shared as prefix`;
+  MODE=healthy (identical stable prefix) ⇒ rule correctly SILENT (only
+  the expected preamble-repay/repeated-block fire). $0 (natural /v1
+  path 404s; requests captured before forward — C1 is request-only).
+- Pure measurement only: byte prefix/suffix (char-boundary safe) +
+  tokenizer sums + integer compares; per provider+model; no prediction
+  of provider cache behaviour (evalint stays KILLED). Harden/mutants
+  in the next commit.
