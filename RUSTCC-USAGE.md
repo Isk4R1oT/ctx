@@ -662,3 +662,103 @@ not an independent SHIP.
   substituted by the tool-grounded compiler-truth loop + 2-pass real
   cargo-mutants; deliberately NOT subagent-delegated (D-008 incident).
   Recorded as a substitution, not an independent SHIP. No false green.
+
+---
+
+## C4 / D-014 — `param-drift` (sampling/decoding parameter drift; + an ADDITIVE `Assembled` field)
+
+- **TDD red-first.** The `compose.rs` behavioral test
+  `param_drift_fires_only_when_a_tracked_field_value_changes` was
+  written FIRST and proven **RED on worktree HEAD `dc895aa`**: a
+  `cargo nextest run` of just that test panicked at `src/compose.rs`
+  ("a changed sampling field across same-(provider,model) turns MUST be
+  indicted") while the full **135** suite stayed green (proven by a
+  prior full `cargo nextest run` = `135 passed, 0 skipped`). An earlier
+  draft that also referenced a not-yet-existing `param_change` helper
+  was a *compile*-fail RED (`error[E0425]: cannot find function
+  param_change`, ×5) — the boundary table was moved to the impl commit
+  (it cannot be `#[ignore]`d), leaving a clean runtime-RED behavioral
+  test that compiles ⇒ `#[ignore]`-with-reason keeps the commit-gate +
+  suite green at the test commit `8ed4af0`; un-ignored at the impl
+  commit `8661dd0` (the D-010/D-013 red-first discipline; C3 had to
+  bundle test+impl because its RED was a compile-fail — C4 avoided that
+  by structuring the RED as a runtime panic, the C2 pattern).
+- **ADDITIVE `Assembled` change (the wave-1 HALT condition, lifted for
+  C4 additively only).** `adapter.rs` gains
+  `Assembled.sampling: Vec<(String,String)>` appended after `tools` +
+  `pub const SAMPLING_FIELDS` + a pure `sampling_of(&Value)` (present-
+  only; `null` ≡ absent; one `for` over the shared slice — no `||`
+  chain). Code-read verified `Assembled` is constructed in only the two
+  `adapter::parse` arms ⇒ contained; `cargo check --all-targets` after
+  the field add = **0 errors** (no other literal construction site).
+- **Compiler-truth loop.** The PostToolUse `rustcc gate` ran `cargo
+  check`/clippy after each `.rs` edit. The digest named ONE root-cause
+  class: clippy `doc_markdown` "item in documentation is missing
+  backticks" — an un-backticked `OpenAI` in the new `SAMPLING_FIELDS`
+  doc comment (`src/adapter.rs:62`). Fixed root-cause-first (backticked
+  the `OpenAI` reference), re-ran `just check` (clippy `-D warnings`
+  incl. pedantic) = **0 errors / 0 warnings**. No hand-rolled cargo;
+  commit-gate never bypassed (no `--no-verify`, no `RUSTCC_GATES=off`).
+- **`just test` after impl: 138 nextest + doctests, 0 skipped** — 135
+  baseline **+3** (the un-ignored behavioral test + the `param_change`
+  exact-boundary table + the `SAMPLING_FIELDS` `black_box` pin). Purely
+  additive, zero regression: all F0/F1/F2/F3 + decode + C1/C2/C3/C6
+  green. The ONLY existing-snapshot change is the additive
+  `"sampling": []` on the param-less `fixture` in
+  `timeline_json_contract.snap` (the `Assembled` serializer); `cargo
+  insta` is not installed, so the `.snap.new` was diffed
+  (`diff` showed EXACTLY two `+ "sampling": []` lines, every other byte
+  identical, `steps` top-level) and applied manually — the C3
+  manually-applied `"headroom": null` precedent; D-005 intact. `grep
+  -l param-drift tests/snapshots` is **empty** (C4 correctly SILENT on
+  every existing fixture).
+- **`cargo deny`/`machete` ok — NO new deps** (`serde_json::Value` +
+  std `BTreeMap` only).
+- **cargo-mutants `--in-diff` on the C4 diff (`dc895aa..HEAD`, src
+  only), TWO independent REAL non-vacuous baselines:**
+  - Pass 1 — `Unmutated baseline ok 22s build + 6s test`, 23 mutants →
+    **20 caught, 3 unviable, 0 MISSED**.
+  - Pass 2 — `Unmutated baseline ok 18s build + 6s test`, 23 mutants →
+    **20 caught, 3 unviable, 0 MISSED** (stable).
+  - 0-missed **by construction** (the proactive D-010/D-011/D-013
+    technique, no 2-pass restructuring): the per-pair decision isolated
+    in pure `param_change` with an exact-boundary unit table; the
+    namespace a single `step_namespace` `(provider,model)` tuple
+    equality (no `&&`/`||` to widen); `SAMPLING_FIELDS` `black_box`-
+    pinned. The 3 unviable are the non-compiling `Default::default()`
+    return arms (genuinely unviable, not equivalent-and-missed).
+- **REAL e2e (green ≠ works).** `cargo build` green; two real
+  python-httpx clients through `./target/debug/ctx run --save` (DUMMY
+  `Authorization: Bearer test`; natural `/v1/chat/completions`;
+  upstream connection-refused/404 — request captured BEFORE forward;
+  $0; no real key).
+  - MODE=drift (turn 2 `temperature` 0.2→0.9, same `gpt-4o`) ⇒
+    **FIRES**: `waste param-drift wasted_tokens=0 1 sampling/decoding
+    field(s) changed mid-session (same provider+model):
+    temperature@step 1 (0.2->0.9) (a reported determinism-surface
+    fact, not a non-determinism claim)`; round-trips post-hoc via
+    `ctx open` AND `ctx --json open`.
+  - MODE=stable (sampling params byte-stable, only the user message
+    changes) ⇒ correctly **SILENT** (0 `param-drift`; 0 findings).
+  - `ctx --json open` (drift): top-level keys exactly
+    `['composition','steps']`, `steps` array top-level,
+    `steps[0].assembled.sampling ==
+    [["temperature","0.2"],["top_p","1"],["max_tokens","512"]]` →
+    `steps[1]` `temperature` `"0.9"`, the `param-drift` indictment
+    round-trips with `wasted_tokens:0` (D-005 intact, additive only).
+- **Pure measurement only.** Value (in)equality (canonical JSON value
+  strings) + named field + step index; `wasted_tokens` hard-0 (a param
+  change re-bills no prompt tokens — never a fabricated cost). The
+  `detail` ends "(a reported determinism-surface fact, not a
+  non-determinism claim)" — the `agentlock` *attribution* is EXCLUDED
+  by construction (evalint stays KILLED; graph stays REFUTED; no
+  kill-zone, no lockfile, no intervention).
+- **`/rust-review`/`/rust-harden` NOT invocable in-thread** (not in
+  this environment's skill registry) → substituted by an in-thread
+  tool-grounded self-review (`grep`/`cargo` verified: no unsafe / no
+  async / no unwrap / no clone-to-silence / no `&&`|`||` in the
+  namespace gate / `wasted_tokens` hard-0 / detail is a reported FACT /
+  SILENT on every existing snapshot) + the 2-pass real cargo-mutants
+  evidence above; deliberately NOT subagent-delegated (the D-008
+  review-subagent integrity incident). Recorded as a substitution, not
+  an independent SHIP. No false green.

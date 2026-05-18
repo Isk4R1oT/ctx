@@ -9,8 +9,10 @@
 > **Status (current state).** Implemented as pure-measurement F1
 > signals (all 2026-05-18): C1 `cache-prefix-break` (D-010), C2
 > `component-drift` (D-011), C3 context-window headroom & slope
-> (D-012), C6 `request-replayed` (D-013). C4 and C5 remain ranked
-> candidates. **C7 deferred by decision (2026-05-18):** ranked LOW +
+> (D-012), C6 `request-replayed` (D-013), C4 `param-drift` (D-014 —
+> the additive `Assembled.sampling` field + the determinism-surface
+> fact; `agentlock`'s non-determinism *attribution* stays EXCLUDED).
+> C5 remains a ranked candidate. **C7 deferred by decision (2026-05-18):** ranked LOW +
 > the honest `store.rs`-does-not-persist-request-headers substrate
 > blocker (shared F0 surface with agentlock/guard) — not built
 > rather than silently half-shipped.
@@ -29,10 +31,13 @@ pure-measurement indictments — `unused-loaded-tools`, `duplicate-block`,
 `repeated-block-across-turns`, `unpruned-history`, `preamble-repay`. F2 is the
 verbatim per-step pager; F3 is the line-level per-step context diff (added /
 removed / retained lines + token deltas, default N vs N-1). Note the live
-limit: the adapter currently extracts only `model` / `system` / `messages` /
-`tools` into the canonical `Assembled`; sampling params, `cache_control`,
-`metadata`, `stop`, response-`usage` are captured verbatim in the body/response
-but **not yet surfaced** as signals. Response headers are **not persisted** by
+limit: the adapter extracts `model` / `system` / `messages` / `tools`, and
+(C4/D-014) the tracked **sampling/decoding fields** into the canonical
+`Assembled` (the additive `sampling` field — `temperature`/`top_p`/`top_k`/
+`max_tokens`/`stop`/`stop_sequences`/penalties/`seed`/`response_format`/
+`tool_choice`, present-only); `cache_control`, `metadata`, response-`usage`
+are still captured verbatim in the body/response but **not yet surfaced** as
+signals. Response headers are **not persisted** by
 `store.rs` (D-009 note) — relevant to several candidates below.
 
 ---
@@ -185,7 +190,7 @@ request-only or needs response/SSE · feasibility · priority.
 - **Caveat `[INFER]`.** Context-window sizes drift per model release; the table
   is a maintained approximation and must be labeled like the tokenizer ±N%.
 
-### C4 — Sampling / decoding parameter drift mid-session  ·  **PRIORITY: MED**
+### C4 — Sampling / decoding parameter drift mid-session  ·  **PRIORITY: MED · IMPLEMENTED (D-014, 2026-05-18)**
 
 - **Definition.** Track `temperature`, `top_p`, `top_k`, `max_tokens`,
   `stop`/`stop_sequences`, presence/frequency penalties, `seed`,

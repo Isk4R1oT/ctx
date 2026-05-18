@@ -820,3 +820,155 @@ tool-grounded self-review (pure / total / panic-free / saturating /
 byte-equality-only / zero `guard`-style intervention) — deliberately
 NOT subagent-delegated (D-008 review-subagent integrity incident).
 Recorded as a substitution, not an independent SHIP.
+
+## D-014 — C4: param-drift, a new pure-measurement F1 indictment (2026-05-18)
+
+### Status: LOCKED. Additive (the PROJECT.md §8 "versioned indictment ruleset" seam, + an ADDITIVE `Assembled` field). Does not relitigate D-001..D-013; evalint stays KILLED; graph stays REFUTED; `agentlock`'s determinism *attribution* stays EXCLUDED.
+
+**Why.** A framework often sets/overrides sampling & decoding request
+fields (`temperature`, `top_p`, `top_k`, `max_tokens`, `stop`/
+`stop_sequences`, presence/frequency penalties, `seed`,
+`response_format`, `tool_choice`) *below the engineer's code*; the wire
+is the only ground truth and only a cross-step holder can assert "field
+X changed at step N". Every incumbent logs params per call but does NOT
+assert a **cross-step drift fact** on the assembled-context timeline —
+it is not their unit of analysis (they think in spans/cost, not "field
+X changed at step 5"), because their SDK→DB→dashboard architecture has
+no verbatim per-step request timeline. `ctx` already holds every
+request body byte-exact (F0); C4 surfaces the **determinism-surface
+fact** the line composes on (the shared F0 substrate `agentlock` will
+later consume — explicitly NOT building `agentlock`'s lockfile here).
+Spec'd and ranked MED by the independent research artifact
+`docs/CONTEXT-SIGNALS-RESEARCH.md` §(c) C4, whose definition /
+"pure-measurement? YES — value equality across steps" note /
+agentlock-boundary caveat / §(d) exclusions this entry obeys exactly.
+
+**The ADDITIVE `Assembled` change (the wave-1 HALT condition lifted for
+C4 only, additively).** Wave-1 agents could not touch `Assembled`; C4
+was explicitly permitted to extend it **additively only**. `adapter.rs`
+gains `Assembled.sampling: Vec<(String, String)>` — the tracked
+sampling fields PRESENT on the wire, as `(field, canonical-json-value)`
+pairs in the order of one shared `pub const SAMPLING_FIELDS` slice. It
+is a **new field appended after `tools`**; no existing field is
+removed/renamed/reordered; serialization stays backward-compatible
+exactly like C3's additive `Composition.headroom`. `Assembled` is
+constructed in only the two `adapter::parse` arms (verified by
+code-read), so the change is contained; the per-field extraction is a
+`for` over the shared slice (no `||` chain for a mutant to widen) and
+deterministically ordered. `absent ≠ a value` is honored at extraction:
+a field missing — or explicitly `null` — is simply **not in the vec**
+(a client sending `"temperature": null` declared no value).
+
+**Rule (pure measurement).** `indict_param_drift`: over consecutive
+requests in the SAME `(provider, model)` namespace (a single
+`step_namespace` tuple equality — the proven D-012 by-construction
+technique, no `provider && model` boolean for a mutant to widen into a
+namespace-crossing `||`), compare each field PRESENT IN BOTH turns; emit
+`param-drift` when any tracked field's value changed, naming the field,
+old→new, and the step index (first event per field pinned via a
+`BTreeMap` ⇒ deterministic ordering, like C2). The per-pair decision is
+isolated in the pure `param_change(field, prev, cur)` helper — ONE
+equality — with an exact-boundary unit table (the D-010/D-011
+technique applied preemptively; no tokenizer/format heuristic can reach
+it through `compose()`). Strictly value (in)equality + named field +
+step index.
+
+**The `agentlock`-boundary (honest, load-bearing).** C4 surfaces the
+determinism-surface FACT. It MUST NEVER say "this drift caused
+non-determinism" / "will change the output" / "is non-reproducible" —
+that *attribution* belongs to `agentlock`'s scoped framing (and even
+there is "attribute", never "reproduce"), and is **EXCLUDED here by
+construction** (CONTEXT-SIGNALS-RESEARCH §c/§d; evalint KILLED). The
+`detail` string ends verbatim "(a reported determinism-surface fact,
+not a non-determinism claim)" — a test + the silent-on-every-existing-
+snapshot fact make the no-attribution discipline auditable. C4 does NOT
+build `agentlock`'s lockfile; the function returns an
+`Option<Indictment>` with no side effect, no network, no mutation.
+
+**Honest limits (recorded, not buried).**
+- `absent ≠ a value`: a field present in one turn and omitted (or
+  `null`) in the next is a deliberate honest **non-event** (a
+  present→absent transition is not a value change — the §(c) C4
+  caveat; under-claims rather than over-claims, the D-010 true-positive
+  bias). Only fields present in BOTH consecutive same-namespace turns
+  are compared.
+- A param change ACROSS a `(provider, model)` boundary is **not**
+  same-namespace drift (a different model is a different determinism
+  surface — the agentlock-boundary caveat); a different/unknown
+  provider or model ⇒ different namespace ⇒ never flagged.
+- Values are compared as **canonical JSON value strings**
+  (`serde_json::Value::to_string()`): `0.2` vs `0.2` is equal, `["X"]`
+  vs `["Y"]` differs — exact verbatim value equality, no normalization
+  that could mask a real change, no semantic interpretation.
+- `wasted_tokens = 0` always: a parameter change re-bills **no** prompt
+  tokens — it is a determinism FACT, not a token-waste class. The
+  headline carries the field/old→new/step facts; never a fabricated
+  cost (the `Indictment` "not a partition" discipline).
+- Request-only; needs ≥2 same-namespace steps. Round-trips post-hoc
+  (`ctx open` re-parses bytes via the adapter, so `sampling` is
+  reconstructed identically).
+
+**`--json` additive (D-005 contract intact, verified).** The new data
+ships as `steps[].assembled.sampling` (additive on the F0 `Assembled`)
+and as the `param-drift` row in `composition.indictments` (additive on
+the F1 side). `report_json`'s `RunReport { #[serde(flatten)] timeline,
+composition }` is unchanged — `--json open` top-level keys stay exactly
+`{steps, composition}`, `steps` top-level, integer/no-float (the
+`wasted_tokens:0` integer, no new float). The ONLY existing-snapshot
+change is the additive `"sampling": []` on the param-less `f1_fixture`/
+`fixture` in `timeline_json_contract.snap` (the `Assembled` serializer)
+— regenerated, the diff verified to be EXACTLY two `+ "sampling": []`
+lines (every other byte identical; `steps` top-level), mirroring C3's
+manually-applied additive `"headroom": null`. Every other F0/F1/F2/F3/
+C1/C2/C3/C6 snapshot is byte-identical (C4 is correctly SILENT on every
+existing fixture — `grep -l param-drift tests/snapshots` is empty).
+
+**Gates (real, non-vacuous).** TDD red-first: the `compose.rs`
+behavioral test was written FIRST and **proven RED on worktree HEAD
+`dc895aa`** (panic: "a changed sampling field across same-(provider,
+model) turns MUST be indicted") while the full **135** suite stayed
+green — recorded in RUSTCC-USAGE.md, `#[ignore]`-with-reason at the
+test commit `8ed4af0` (commit-gate/suite green), un-ignored in the impl
+commit `8661dd0`. Compiler-truth loop (`just check`, clippy `-D
+warnings` incl. pedantic): the PostToolUse `rustcc gate` digest named
+ONE root-cause class — `doc_markdown` "item in documentation is missing
+backticks" (an un-backticked `OpenAI` in the new doc comment); fixed
+root-cause-first, re-checked green. `just test` = **138 nextest**
+(135 baseline +3: the un-ignored behavioral test + the `param_change`
+boundary table + the `SAMPLING_FIELDS` pin) + doctests, 0 skipped —
+purely additive, zero regression. `cargo deny`
+advisories/bans/licenses/sources ok; `cargo machete` no unused deps
+(**no new deps** — `serde_json::Value` + std `BTreeMap` only).
+cargo-mutants `--in-diff` on the C4 diff, **two independent REAL
+non-vacuous baselines**: pass 1 `Unmutated baseline ok 22s build + 6s
+test` → 23 mutants → **20 caught, 3 unviable, 0 MISSED**; pass 2
+`Unmutated baseline ok 18s build + 6s test` → 23 mutants → **20
+caught, 3 unviable, 0 MISSED** (stable). 0-missed reached **by
+construction** (the proactive D-010/D-011/D-013 technique: the decision
+isolated in pure `param_change` with an exact-boundary table; namespace
+a single `step_namespace` tuple equality; `SAMPLING_FIELDS`
+`black_box`-pinned) — NOT post-hoc test patching; the 3 unviable are
+the non-compiling `Default::default()` return arms (genuinely unviable,
+not equivalent-and-missed; no 2-pass restructuring needed, unlike
+D-010). Real e2e (green ≠ works): two real python-httpx clients through
+`ctx run --save` (DUMMY `Authorization: Bearer test`; natural
+`/v1/chat/completions`; upstream 404 — request captured BEFORE forward;
+$0; no real key). MODE=drift (turn 2 changes `temperature` 0.2→0.9
+under the same provider+model) ⇒ **FIRES** (`param-drift
+wasted_tokens=0 … temperature@step 1 (0.2->0.9) (a reported
+determinism-surface fact, not a non-determinism claim)`), round-trips
+post-hoc through `ctx open` AND `ctx --json open`; MODE=stable
+(sampling params byte-stable, only the user message changes) ⇒
+correctly **SILENT** (0 `param-drift` rows; 0 findings). `--json open`
+verified: top-level keys exactly `{composition, steps}`, `steps` array
+top-level, `assembled.sampling` the additive present-only pairs
+(`[["temperature","0.2"],["top_p","1"],["max_tokens","512"]]` →
+`[["temperature","0.9"],…]`), the `param-drift` indictment round-trips
+with `wasted_tokens:0`. `/rust-review` + `/rust-harden` NOT invocable
+in-thread (not in this environment's skill registry) → substituted by
+an in-thread tool-grounded self-review (pure / no-unsafe / no-async /
+no-unwrap / no-clone-to-silence / no `&&`|`||` in the namespace gate /
+`wasted_tokens` hard-0 / detail is a reported FACT not a prediction /
+SILENT on every existing snapshot) — deliberately NOT subagent-
+delegated (the D-008 review-subagent integrity incident). Recorded as a
+substitution, not an independent SHIP. No false green.
