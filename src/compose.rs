@@ -1070,4 +1070,131 @@ mod tests {
             "a different model is a different cache namespace, not a break"
         );
     }
+
+    // ---- C6 (D-013) — same-body re-send / retry-replay detection -------
+    // PURE MEASUREMENT: full-body byte-equality + count + the duplicated
+    // (re-billed) token weight + the buffered-response status of the
+    // replayed attempt. Whole-body sibling of repeated-block-across-turns.
+    // It REPORTS the fact only — it must NEVER throttle / circuit-break /
+    // intervene (that is `guard`; EXCLUDED here, research §c/§d).
+
+    #[test]
+    fn request_replayed_fires_on_a_byte_identical_resend_with_status() {
+        // A real retry shape: the SAME assembled prompt is POSTed twice
+        // because attempt 1 got a 529 (overloaded). The HTTP/framework
+        // layer below the user's code re-issues it verbatim; only the
+        // wire shows the identical re-send.
+        let body = br#"{"model":"m","system":"You are a careful assistant for the replay fixture.","messages":[{"role":"user","content":"a reasonably long user question that will be retried verbatim"}]}"#;
+        let mut t = Timeline::new();
+        let i = t.record_request("POST", "/v1/messages", &[], body);
+        t.record_response(i, 529, &[], br#"{"type":"overloaded_error"}"#);
+        let j = t.record_request("POST", "/v1/messages", &[], body);
+        t.record_response(j, 200, &[], br#"{"content":[{"type":"text","text":"ok"}]}"#);
+
+        let c = compose(&t, false);
+        let ind = c
+            .indictments
+            .iter()
+            .find(|i| i.code == "request-replayed")
+            .expect("a byte-identical re-send MUST be indicted as request-replayed");
+        // 2 occurrences of one body ⇒ exactly 1 re-billed copy.
+        assert!(
+            ind.detail.contains('1'),
+            "detail must report the replay/re-billed count: {}",
+            ind.detail
+        );
+        // The re-billed cost = exactly one extra copy of the body tokens.
+        assert_eq!(
+            ind.wasted_tokens,
+            crate::tokenizer::count(std::str::from_utf8(body).unwrap()),
+            "wasted = exactly the re-sent (re-billed) copy"
+        );
+        // Status annotation from the ALREADY-BUFFERED response of the
+        // first (replayed) attempt — the real, re-billed retry cause.
+        assert!(
+            ind.detail.contains("529"),
+            "must annotate the replayed attempt's buffered status: {}",
+            ind.detail
+        );
+    }
+
+    #[test]
+    fn request_replayed_silent_on_distinct_bodies() {
+        // Control: two DIFFERENT bodies (a normal multi-turn run) must
+        // NOT fire — replay is whole-body byte-equality, not similarity.
+        let mut t = Timeline::new();
+        t.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","messages":[{"role":"user","content":"the first distinct question for this run"}]}"#,
+        );
+        t.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","messages":[{"role":"user","content":"a second, entirely different question here"}]}"#,
+        );
+        assert!(
+            !has_code(&t, "request-replayed"),
+            "two distinct bodies are a normal turn, never a replay"
+        );
+
+        // A single step cannot be a replay.
+        let mut one = Timeline::new();
+        one.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","messages":[{"role":"user","content":"only one request was ever sent"}]}"#,
+        );
+        assert!(
+            !has_code(&one, "request-replayed"),
+            "a lone request cannot have been replayed"
+        );
+
+        // An empty body is not an indictable replay even if repeated
+        // (no real re-billed prompt cost; avoids glue/noise).
+        let mut empties = Timeline::new();
+        empties.record_request("POST", "/v1/messages", &[], b"");
+        empties.record_request("POST", "/v1/messages", &[], b"");
+        assert!(
+            !has_code(&empties, "request-replayed"),
+            "empty bodies carry no re-billed prompt cost"
+        );
+    }
+
+    #[test]
+    fn request_replayed_counts_every_re_billed_copy() {
+        // 3 identical sends ⇒ 2 re-billed copies; a 4th distinct body is
+        // ignored. Pins the (occurrences - 1) weight and the count.
+        let dup = br#"{"model":"m","messages":[{"role":"user","content":"a verbatim body sent three separate times for the retry storm"}]}"#;
+        let mut t = Timeline::new();
+        for _ in 0..3 {
+            let i = t.record_request("POST", "/v1/messages", &[], dup);
+            t.record_response(i, 500, &[], b"{}");
+        }
+        t.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","messages":[{"role":"user","content":"an unrelated final body, not part of the storm"}]}"#,
+        );
+        let c = compose(&t, false);
+        let ind = c
+            .indictments
+            .iter()
+            .find(|i| i.code == "request-replayed")
+            .expect("3 identical sends must be indicted");
+        assert_eq!(
+            ind.wasted_tokens,
+            crate::tokenizer::count(std::str::from_utf8(dup).unwrap()) * 2,
+            "3 sends ⇒ exactly 2 re-billed copies"
+        );
+        assert!(
+            ind.detail.contains('2'),
+            "detail must report 2 re-billed copies: {}",
+            ind.detail
+        );
+    }
 }
