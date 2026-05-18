@@ -185,5 +185,11 @@ mod tests {
         );
         // Unparseable ⇒ fallback (never a silently-wrong upstream).
         assert_eq!(base_of("not a url", "https://fb"), "https://fb");
+        // Parses OK but has an OPAQUE (`null`) origin (data:/file:/…) ⇒
+        // fallback, never accepted as an upstream. Pins the
+        // `!= "null"` guard (a `true`-guard mutant would wrongly
+        // forward to `data:…`).
+        assert_eq!(base_of("data:text/plain,x", "https://fb"), "https://fb");
+        assert_eq!(base_of("file:///etc/x", "https://fb"), "https://fb");
     }
 }
