@@ -1,5 +1,6 @@
 ---
 source: tests/snapshots.rs
+assertion_line: 59
 expression: fixture()
 ---
 {
@@ -42,7 +43,8 @@ expression: fixture()
             "name": "search",
             "schema_tokens": 6
           }
-        ]
+        ],
+        "sampling": []
       },
       "prompt_tokens": 9
     },
@@ -70,7 +72,8 @@ expression: fixture()
             "text": "ping"
           }
         ],
-        "tools": []
+        "tools": [],
+        "sampling": []
       },
       "prompt_tokens": 2
     }

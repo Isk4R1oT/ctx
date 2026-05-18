@@ -368,6 +368,7 @@ fn indict(timeline: &Timeline) -> Vec<Indictment> {
         indict_cache_prefix_break(timeline),
         indict_request_replayed(timeline),
         indict_component_drift(timeline),
+        indict_param_drift(timeline),
     ]
     .into_iter()
     .flatten()
@@ -837,6 +838,105 @@ fn indict_component_drift(timeline: &Timeline) -> Option<Indictment> {
             sat_sum(deltas.iter().copied())
         ),
         wasted_tokens: sat_sum(deltas.into_iter()),
+    })
+}
+
+/// C4 (D-014) — the pure per-pair decision for ONE sampling field:
+/// given a field name and its canonical JSON value at the previous and
+/// current appearance, the drift event `(field, old, new)` iff the value
+/// changed, else `None`. ONE equality, isolated here so the only
+/// comparison is unit-pinnable at its exact boundary — no tokenizer /
+/// format heuristic can reach it through `compose()` (the proven
+/// D-010/D-011 by-construction technique). STRICTLY PURE MEASUREMENT:
+/// verbatim value (in)equality, no judgment, NEVER "this caused
+/// non-determinism" (that attribution is `agentlock`'s; EXCLUDED here).
+fn param_change(field: &str, prev: &str, cur: &str) -> Option<(String, String, String)> {
+    if prev == cur {
+        return None; // byte-identical value ⇒ NOT drift
+    }
+    Some((field.to_string(), prev.to_string(), cur.to_string()))
+}
+
+/// C4 (D-014) — `param-drift`. A framework often sets/overrides sampling
+/// & decoding request fields (`temperature`, `top_p`, `max_tokens`,
+/// `stop`, `seed`, `tool_choice`, …) invisibly between the engineer's
+/// code and the model; the wire is the only ground truth and only a
+/// cross-step holder can assert "field X changed at step N". Across
+/// consecutive requests in the SAME `(provider, model)` namespace, emit
+/// `param-drift` when any tracked field's value changes between two
+/// turns, naming the field, old→new, and the step index.
+///
+/// STRICTLY PURE MEASUREMENT: value (in)equality + named field + step
+/// index. It is a REPORTED FACT — it NEVER says "this drift caused
+/// non-determinism / will change the output". That determinism
+/// *attribution* belongs to `agentlock`'s scoped framing and is
+/// **EXCLUDED here by construction** (CONTEXT-SIGNALS-RESEARCH §c/§d;
+/// evalint KILLED). C4 does NOT build `agentlock`'s lockfile — it only
+/// surfaces the determinism-surface fact `agentlock` will later consume
+/// (the shared F0 substrate). The namespace is a single `(provider,
+/// model)` tuple equality via `step_namespace` (the proven D-012
+/// by-construction technique — no `provider && model` boolean for a
+/// mutant to widen into a namespace-crossing `||`).
+///
+/// `absent ≠ a value` (the C4 spec caveat): a field present in one turn
+/// and omitted in the next is NOT a value change — only fields present
+/// in BOTH consecutive same-namespace turns are compared. `wasted_tokens`
+/// is `0` here: a parameter change re-bills no prompt tokens (it is a
+/// determinism fact, not a token-waste class); the headline carries the
+/// field/old→new/step facts, never a fabricated cost.
+fn indict_param_drift(timeline: &Timeline) -> Option<Indictment> {
+    // Distinct "field@step ix (old->new)" events, first occurrence per
+    // field pinned (a BTreeMap ⇒ deterministic ordering, like C2).
+    let mut first_event: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for w in timeline.steps.windows(2) {
+        let (a, b) = (&w[0], &w[1]);
+        // Same (provider, model) namespace only — a different model is a
+        // different determinism surface (the agentlock-boundary caveat).
+        // ONE tuple equality (no `&&` for a mutant to widen into `||`).
+        match (step_namespace(a), step_namespace(b)) {
+            (Some(x), Some(y)) if x == y => {}
+            _ => continue,
+        }
+        let (Some(pa), Some(pb)) = (a.assembled.as_ref(), b.assembled.as_ref()) else {
+            continue;
+        };
+        // A field is compared only when PRESENT in BOTH turns
+        // (`absent ≠ a value`). The lookup is a `BTreeMap` over the
+        // small fixed `SAMPLING_FIELDS` set, so the comparison is the
+        // sole decision (isolated in `param_change`).
+        let prev: std::collections::BTreeMap<&str, &str> = pa
+            .sampling
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        for (field, cur) in &pb.sampling {
+            if let Some(old) = prev.get(field.as_str()) {
+                if let Some((f, o, n)) = param_change(field, old, cur) {
+                    first_event
+                        .entry(f.clone())
+                        .or_insert_with(|| format!("{f}@step {} ({o}->{n})", b.index));
+                }
+            }
+        }
+    }
+    if first_event.is_empty() {
+        return None;
+    }
+    let events = first_event
+        .values()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(Indictment {
+        code: "param-drift".to_string(),
+        detail: format!(
+            "{} sampling/decoding field(s) changed mid-session (same provider+model): {events} (a reported determinism-surface fact, not a non-determinism claim)",
+            first_event.len()
+        ),
+        // A param change re-bills no prompt tokens — it is a determinism
+        // fact, not a token-waste class. `0` (never a fabricated cost).
+        wasted_tokens: 0,
     })
 }
 
@@ -1470,12 +1570,71 @@ mod tests {
     // evalint KILLED). `absent ≠ a value`: a field present in one turn
     // and omitted in the next is NOT a value change.
     #[test]
-    // RED-FIRST (D-014): proven failing on worktree HEAD dc895aa (panic
-    // "a changed sampling field across same-(provider,model) turns MUST
-    // be indicted") while the full 135 suite stays green. `#[ignore]`
-    // keeps the commit-gate/suite green at the test commit; un-ignored
-    // in the impl commit (the D-010/D-013 red-first discipline).
-    #[ignore = "C4/D-014 red-first: param-drift not implemented yet (un-ignored at the impl commit)"]
+    fn param_change_decision_exact_boundaries() {
+        // The pure per-pair decision, pinned at its exact boundary so no
+        // tokenizer/format heuristic can reach it through compose() (the
+        // D-010/D-011 technique). Equal value ⇒ None; any inequality ⇒
+        // Some((field, old, new)) — verbatim, no judgment.
+        assert_eq!(param_change("temperature", "0.2", "0.2"), None);
+        assert_eq!(
+            param_change("temperature", "0.2", "0.7"),
+            Some((
+                "temperature".to_string(),
+                "0.2".to_string(),
+                "0.7".to_string()
+            ))
+        );
+        // canonical JSON value strings compared verbatim — a real change
+        // is a real change (kills the ==→!= and value-swap mutants).
+        assert_eq!(
+            param_change("top_p", "1", "0.9"),
+            Some(("top_p".to_string(), "1".to_string(), "0.9".to_string()))
+        );
+        // identical structured values (stop arrays) ⇒ no event.
+        assert_eq!(param_change("stop", "[\"X\"]", "[\"X\"]"), None);
+        assert_eq!(
+            param_change("stop", "[\"X\"]", "[\"Y\"]"),
+            Some((
+                "stop".to_string(),
+                "[\"X\"]".to_string(),
+                "[\"Y\"]".to_string()
+            ))
+        );
+        // empty == empty ⇒ no event; the field name is carried through
+        // verbatim (kills a mutant that drops/duplicates a tuple slot).
+        assert_eq!(param_change("seed", "", ""), None);
+        assert_eq!(
+            param_change("seed", "1", "2"),
+            Some(("seed".to_string(), "1".to_string(), "2".to_string()))
+        );
+    }
+
+    #[test]
+    fn sampling_fields_are_the_documented_tracked_set() {
+        // `black_box` keeps this a real runtime check (not const-folded)
+        // — pins the tracked-field slice + its order so a mutant that
+        // drops/reorders an entry is caught (the C1/C3 const discipline).
+        let f = std::hint::black_box(crate::adapter::SAMPLING_FIELDS);
+        assert_eq!(
+            f,
+            &[
+                "temperature",
+                "top_p",
+                "top_k",
+                "max_tokens",
+                "max_completion_tokens",
+                "stop",
+                "stop_sequences",
+                "presence_penalty",
+                "frequency_penalty",
+                "seed",
+                "response_format",
+                "tool_choice",
+            ]
+        );
+    }
+
+    #[test]
     fn param_drift_fires_only_when_a_tracked_field_value_changes() {
         // FIRES — temperature changes between turn 0 and turn 1 under the
         // SAME (provider, model). top_p stable.

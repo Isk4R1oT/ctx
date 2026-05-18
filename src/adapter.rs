@@ -50,6 +50,51 @@ pub struct WireTool {
     pub schema_tokens: usize,
 }
 
+/// Sampling/decoding fields tracked for C4 `param-drift` (D-014). These
+/// are the request fields a framework can silently set/override and that
+/// define the **determinism surface** of a turn. Surfacing them is a
+/// pure FACT — `ctx` reports the value, never attributes non-determinism
+/// (that is `agentlock`'s scoped framing; EXCLUDED here, evalint KILLED).
+/// A single shared, ordered slice: the per-field extraction is a `for`
+/// over this list (no `||` chain for a mutant to widen) and the result
+/// is deterministically ordered (slice order == declaration order).
+/// Covers both wire shapes — `stop_sequences` is Anthropic's spelling of
+/// the `OpenAI` `stop` field; both are tracked verbatim (no
+/// canonicalization that could mask a real change).
+pub const SAMPLING_FIELDS: &[&str] = &[
+    "temperature",
+    "top_p",
+    "top_k",
+    "max_tokens",
+    "max_completion_tokens",
+    "stop",
+    "stop_sequences",
+    "presence_penalty",
+    "frequency_penalty",
+    "seed",
+    "response_format",
+    "tool_choice",
+];
+
+/// Extract the tracked sampling fields PRESENT in the wire body, as
+/// `(field, canonical_json_value_string)` pairs in `SAMPLING_FIELDS`
+/// order. A field **absent** from the body is **not** in the vec
+/// (`absent ≠ a value` — the C4 spec caveat: a present→absent transition
+/// is NOT a value change). The value is `Value::to_string()` (canonical
+/// JSON) so `0.2` vs `0.2` compares equal and `["X"]` vs `["Y"]` differs
+/// — pure verbatim value equality, no judgment. `null` is treated as
+/// absence (a client sending `"temperature": null` declared no value).
+fn sampling_of(v: &Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for &field in SAMPLING_FIELDS {
+        match v.get(field) {
+            None | Some(Value::Null) => {}
+            Some(val) => out.push((field.to_string(), val.to_string())),
+        }
+    }
+    out
+}
+
 /// The canonical assembled-prompt view, normalized across providers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Assembled {
@@ -58,6 +103,13 @@ pub struct Assembled {
     pub system: Option<String>,
     pub messages: Vec<WireMessage>,
     pub tools: Vec<WireTool>,
+    /// C4 (D-014) — tracked sampling/decoding fields PRESENT on the wire,
+    /// as `(field, canonical-json-value)` pairs in `SAMPLING_FIELDS`
+    /// order. ADDITIVE (D-014, mirrors C3's additive `Composition`
+    /// field): a new key, never removing/reordering an existing one;
+    /// serialization stays backward-compatible. Empty when the body
+    /// carries none (the common case — `f1_fixture` etc. stay silent).
+    pub sampling: Vec<(String, String)>,
 }
 
 // --- Defensive wire extraction ----------------------------------------
@@ -171,6 +223,7 @@ pub fn parse(provider: Provider, body: &[u8]) -> crate::Result<Assembled> {
                 system,
                 messages,
                 tools,
+                sampling: sampling_of(&v),
             })
         }
         Provider::OpenAiCompat => {
@@ -205,6 +258,7 @@ pub fn parse(provider: Provider, body: &[u8]) -> crate::Result<Assembled> {
                 system,
                 messages,
                 tools,
+                sampling: sampling_of(&v),
             })
         }
     }
