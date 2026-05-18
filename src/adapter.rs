@@ -95,6 +95,68 @@ fn sampling_of(v: &Value) -> Vec<(String, String)> {
     out
 }
 
+/// C5 (D-015) — content-block `type` values that carry a non-text
+/// (multimodal / file) payload, across BOTH wire shapes. Anthropic uses
+/// `image` / `document`; `OpenAI` uses `image_url` / `input_audio` /
+/// `file`. A single shared, ordered slice so the detection is a pure
+/// membership test (no `||` chain for a mutant to widen) — a content
+/// block whose `type` is in this set is attributed as non-text weight,
+/// everything else (incl. `text`) is left to flow into `history` exactly
+/// as before (ZERO history/F0 regression — C5 is purely additive).
+pub const NON_TEXT_KINDS: &[&str] = &[
+    "image",
+    "image_url",
+    "input_audio",
+    "audio",
+    "document",
+    "file",
+];
+
+/// C5 (D-015) — one non-text content block detected on the wire. The
+/// byte figure is the **EXACT wire byte length** of that block's JSON
+/// (`Value::to_string().len()`) — the real weight those bytes add to the
+/// request body. base64 length is NOT decoded (no base64 crate, no
+/// guess): the wire bytes ARE the cost. STRICTLY PURE MEASUREMENT —
+/// kind label + exact byte length; NO media token estimate (the weakest
+/// tokenizer regime — omitted entirely to stay strictly pure, per the
+/// C5 spec / `CONTEXT-SIGNALS-RESEARCH` §c).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NonTextPart {
+    /// The content block `type` verbatim (e.g. `image_url`, `image`,
+    /// `input_audio`, `file`) — a member of `NON_TEXT_KINDS`.
+    pub kind: String,
+    /// EXACT wire byte length of this content block's JSON.
+    pub bytes: usize,
+}
+
+/// C5 (D-015) — the non-text (multimodal/file) content blocks PRESENT in
+/// the wire body, in message-then-block order. A block is non-text iff
+/// its `type` is in `NON_TEXT_KINDS`; its `bytes` is the EXACT byte
+/// length of that block's wire JSON (base64 NOT decoded — the wire bytes
+/// are the real cost; no new dep). Absent (text-only) ⇒ empty vec (the
+/// common case — every existing fixture stays silent, like C4's
+/// `sampling`). Pure extraction, no judgment (evalint KILLED).
+fn non_text_of(messages: &[Value]) -> Vec<NonTextPart> {
+    let mut out = Vec::new();
+    for m in messages {
+        let Some(blocks) = m.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for b in blocks {
+            let Some(kind) = b.get("type").and_then(Value::as_str) else {
+                continue;
+            };
+            if NON_TEXT_KINDS.contains(&kind) {
+                out.push(NonTextPart {
+                    kind: kind.to_string(),
+                    bytes: b.to_string().len(),
+                });
+            }
+        }
+    }
+    out
+}
+
 /// The canonical assembled-prompt view, normalized across providers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Assembled {
@@ -110,6 +172,14 @@ pub struct Assembled {
     /// serialization stays backward-compatible. Empty when the body
     /// carries none (the common case — `f1_fixture` etc. stay silent).
     pub sampling: Vec<(String, String)>,
+    /// C5 (D-015) — non-text (multimodal/file) content blocks PRESENT on
+    /// the wire, in message-then-block order, each with its EXACT wire
+    /// byte length. ADDITIVE (mirrors C4's `sampling` exactly): a new
+    /// field appended after `sampling`, never removing/reordering an
+    /// existing one; serialization stays backward-compatible. Empty when
+    /// the body is text-only (the common case — every existing fixture
+    /// stays silent, like `sampling`).
+    pub non_text: Vec<NonTextPart>,
 }
 
 // --- Defensive wire extraction ----------------------------------------
@@ -224,6 +294,7 @@ pub fn parse(provider: Provider, body: &[u8]) -> crate::Result<Assembled> {
                 messages,
                 tools,
                 sampling: sampling_of(&v),
+                non_text: non_text_of(messages_of(&v)),
             })
         }
         Provider::OpenAiCompat => {
@@ -259,6 +330,7 @@ pub fn parse(provider: Provider, body: &[u8]) -> crate::Result<Assembled> {
                 messages,
                 tools,
                 sampling: sampling_of(&v),
+                non_text: non_text_of(messages_of(&v)),
             })
         }
     }

@@ -44,7 +44,8 @@ expression: fixture()
             "schema_tokens": 6
           }
         ],
-        "sampling": []
+        "sampling": [],
+        "non_text": []
       },
       "prompt_tokens": 9
     },
@@ -73,7 +74,8 @@ expression: fixture()
           }
         ],
         "tools": [],
-        "sampling": []
+        "sampling": [],
+        "non_text": []
       },
       "prompt_tokens": 2
     }

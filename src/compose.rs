@@ -171,6 +171,31 @@ fn sat_sum(it: impl Iterator<Item = usize>) -> usize {
     it.fold(0usize, usize::saturating_add)
 }
 
+/// C5 (D-015) — the pure non-text-payload decision for ONE step: given
+/// the focus step's non-text block byte sizes and the EXACT assembled
+/// request-body byte length, return `(block_count, total_non_text_bytes,
+/// percent_of_body)` iff there is at least one non-text block, else
+/// `None`. Isolated here so the only arithmetic (the count, the
+/// saturating byte sum, the integer percent) is unit-pinnable at its
+/// exact boundary — no tokenizer/heuristic reaches it through
+/// `compose()` (the proven D-010/D-011/D-014 by-construction technique).
+///
+/// STRICTLY PURE MEASUREMENT: an exact block count plus an exact byte
+/// sum plus an integer percent of the EXACT body byte length. NO media
+/// token estimate (the weakest tokenizer regime — omitted entirely to
+/// stay strictly pure, per the C5 spec). NO judgment (a "too big" or
+/// "will be ignored" verdict is evalint — EXCLUDED). The shared integer
+/// `pct()` is reused (floored, no float, snapshot-stable,
+/// div-by-zero-safe).
+fn non_text_weight(part_bytes: &[usize], body_bytes: usize) -> Option<(usize, usize, u32)> {
+    let count = part_bytes.len();
+    if count == 0 {
+        return None; // text-only ⇒ no non-text-payload claim (silent)
+    }
+    let total = sat_sum(part_bytes.iter().copied());
+    Some((count, total, pct(total, body_bytes)))
+}
+
 /// Recursively collect tool names the model actually invoked, across
 /// both wire shapes (Anthropic `tool_use` blocks, `OpenAI` `tool_calls`).
 fn collect_used(v: &Value, out: &mut BTreeSet<String>) {
@@ -247,6 +272,25 @@ pub fn compose(timeline: &Timeline, deep: bool) -> Composition {
                 tokens: hist,
                 pct: pct(hist, total),
             });
+            // C5 (D-015) — a DISTINCT non-text-payload component so the
+            // multimodal/file byte weight is attributed on its own row
+            // instead of silently hiding inside `history`. The EXACT
+            // byte/block/% facts are carried by the `non-text-payload`
+            // INDICTMENT (the spec's required output string); this row's
+            // `tokens` is a hard `0` ON PURPOSE — the per-image token
+            // figure is the weakest tokenizer regime and is OMITTED
+            // ENTIRELY to stay strictly pure (the C5 spec). A `0`-token
+            // additive row never perturbs the `Σ components == total`
+            // invariant (`decomposes_by_source`) — purely additive,
+            // present only when the wire actually carried a non-text
+            // block (text-only ⇒ absent, like C4's `sampling`).
+            if !a.non_text.is_empty() {
+                components.push(Component {
+                    label: "non-text-payload".to_string(),
+                    tokens: 0,
+                    pct: 0,
+                });
+            }
             if deep {
                 for t in &a.tools {
                     tools_deep.push(Component {
@@ -369,6 +413,7 @@ fn indict(timeline: &Timeline) -> Vec<Indictment> {
         indict_request_replayed(timeline),
         indict_component_drift(timeline),
         indict_param_drift(timeline),
+        indict_non_text_payload(timeline),
     ]
     .into_iter()
     .flatten()
@@ -936,6 +981,63 @@ fn indict_param_drift(timeline: &Timeline) -> Option<Indictment> {
         ),
         // A param change re-bills no prompt tokens — it is a determinism
         // fact, not a token-waste class. `0` (never a fabricated cost).
+        wasted_tokens: 0,
+    })
+}
+
+/// C5 (D-015) — `non-text-payload`. Multimodal / file content (base64
+/// data URIs, `image`/`image_url`/`input_audio`/`file`/`document`
+/// blocks, both wire shapes) is invisible to the SDK→DB→dashboard field
+/// (`OTEL` `GenAI` content capture is OFF by default; even on, large
+/// media is truncated by the exporter) — only `ctx`'s verbatim wire
+/// capture holds it. Without C5 those bytes silently inflate `history`;
+/// C5 attributes them as their OWN component + this indictment so the
+/// engineer SEES that e.g. 38% of the assembled body is inline image
+/// data.
+///
+/// Focus = the last structurally-parsed step (the SAME focus as the F1
+/// headline / the `non-text-payload` component) — one representative
+/// step, not a cross-step sum (kept minimal & pure, like C2/C4's first-
+/// event discipline). The `%` is of the focus step's EXACT request-body
+/// byte length (the real on-the-wire denominator), div-by-zero-safe via
+/// the shared integer `pct()`.
+///
+/// STRICTLY PURE MEASUREMENT: an EXACT block count + an EXACT byte sum +
+/// an integer percent of the EXACT body byte length. base64 is NOT
+/// decoded (the wire bytes ARE the cost; no new dep). NO media token
+/// estimate (the weakest tokenizer regime — omitted entirely to stay
+/// strictly pure, per the C5 spec / `CONTEXT-SIGNALS-RESEARCH` §c). NO
+/// judgment — it NEVER says "too big" / "will be ignored" (that is
+/// evalint — KILLED, EXCLUDED §d). `wasted_tokens` is a hard `0`: a
+/// non-text payload is a byte-ATTRIBUTION fact, not a token-waste class
+/// (mirrors C4's hard-`0`; the headline carries the block/byte/% facts,
+/// never a fabricated cost). The per-pair decision is isolated in the
+/// pure `non_text_weight` helper (an exact-boundary unit table — no
+/// tokenizer/heuristic can reach it through `compose()`).
+fn indict_non_text_payload(timeline: &Timeline) -> Option<Indictment> {
+    let focus = timeline.steps.iter().rev().find(|s| s.assembled.is_some())?;
+    let parts = &focus.assembled.as_ref()?.non_text;
+    let body_bytes = focus.request.body.len();
+    let part_bytes: Vec<usize> = parts.iter().map(|p| p.bytes).collect();
+    let (count, bytes, percent) = non_text_weight(&part_bytes, body_bytes)?;
+    // Deterministic per-kind tally (BTreeMap ⇒ sorted, like C2/C4).
+    let mut by_kind: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for p in parts {
+        *by_kind.entry(p.kind.as_str()).or_insert(0) += 1;
+    }
+    let kinds = by_kind
+        .iter()
+        .map(|(k, n)| format!("{n} {k}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(Indictment {
+        code: "non-text-payload".to_string(),
+        detail: format!(
+            "non-text-payload: {count} block(s) ({kinds}), ~{bytes} bytes ({percent}% of the assembled body) — exact wire bytes, base64 not decoded, no media token estimate (omitted to stay strictly pure)"
+        ),
+        // A byte-ATTRIBUTION fact, not a token-waste class — never a
+        // fabricated cost (the C4 hard-`0` discipline, the `Indictment`
+        // "not a partition" rule).
         wasted_tokens: 0,
     })
 }
@@ -2282,7 +2384,6 @@ mod tests {
     // --- C5 (D-015) non-text-payload weight attribution ----------------
 
     #[test]
-    #[ignore = "C5/D-015 red-first: non-text-payload not implemented at the test commit; un-ignored at the impl commit (the D-011/D-014 commit-gate-green pattern)"]
     fn non_text_payload_fires_and_is_a_distinct_component_not_silent_history() {
         // A real OpenAI-shaped chat.completions body with a base64 image
         // content-part (a tiny 1x1 PNG data URI). The payload bytes must
@@ -2346,5 +2447,50 @@ mod tests {
                 .any(|p| p.label == "non-text-payload"),
             "a text-only body MUST NOT add a non-text-payload component"
         );
+    }
+
+    #[test]
+    fn non_text_kinds_are_the_documented_tracked_set() {
+        // `black_box` keeps this a real runtime check (not const-folded)
+        // — pins the tracked-kind slice + its order so a mutant that
+        // drops/reorders/adds an entry is caught (the C1/C3/C4 const
+        // discipline). Covers BOTH wire shapes (Anthropic image/document;
+        // OpenAI image_url/input_audio/file) — the D-007 dual-provider rule.
+        let k = std::hint::black_box(crate::adapter::NON_TEXT_KINDS);
+        assert_eq!(
+            k,
+            &[
+                "image",
+                "image_url",
+                "input_audio",
+                "audio",
+                "document",
+                "file",
+            ]
+        );
+    }
+
+    #[test]
+    fn non_text_weight_exact_boundaries() {
+        // 0 blocks ⇒ None (text-only is silent; kills the `== 0`→`!= 0`
+        // / `is_empty` mutants and a fabricated-Some return):
+        assert_eq!(non_text_weight(&[], 1000), None);
+        assert_eq!(non_text_weight(&[], 0), None);
+        // 1 block: exact count, exact byte sum, integer floored percent
+        // (kills count/sum/pct mutants — the approx tokenizer cannot
+        // reach these through `compose()`):
+        assert_eq!(non_text_weight(&[250], 1000), Some((1, 250, 25)));
+        // multiple blocks: count is the slice len, bytes the saturating
+        // sum, percent floored (380/1000 = 38%):
+        assert_eq!(non_text_weight(&[200, 180], 1000), Some((2, 380, 38)));
+        // body smaller than payload (a tiny envelope around a huge image)
+        // ⇒ percent is capped only by the integer math, never panics:
+        assert_eq!(non_text_weight(&[900], 1000), Some((1, 900, 90)));
+        // body == 0 ⇒ pct() is div-by-zero-safe ⇒ 0%, still reports the
+        // exact count + bytes (kills a panic/`unwrap` mutant in pct):
+        assert_eq!(non_text_weight(&[42], 0), Some((1, 42, 0)));
+        // a zero-byte block still counts as a block (count is structural,
+        // not byte-gated — kills a `len()` → byte-filter mutant):
+        assert_eq!(non_text_weight(&[0], 100), Some((1, 0, 0)));
     }
 }
