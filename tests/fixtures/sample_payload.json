@@ -1,0 +1,1 @@
+{"model":"gpt-4o","messages":[{"role":"system","content":"be terse"},{"role":"user","content":"a real question for the codec fixture"}],"tools":[{"type":"function","function":{"name":"t","parameters":{"type":"object"}}}]}

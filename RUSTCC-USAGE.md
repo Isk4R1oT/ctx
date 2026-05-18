@@ -290,3 +290,40 @@
   honest-Layer-2 follow-up, not a silent gap; pre-fix saved sessions
   unrecoverable). No false green; every gate tool-verified on a real
   baseline.
+
+---
+
+## D-009 follow-up — multi-codec decode (zstd/brotli/zlib), user-requested defensive extension
+
+- **Web research first (user asked):** request-body `Content-Encoding`
+  is uncommon (mostly a *response* mechanism); gzip-on-request is the
+  only one seen real, zstd/br/deflate is defensive. Pure-Rust decoders
+  chosen ⇒ single static binary preserved: flate2 `ZlibDecoder`
+  (already a dep), `ruzstd` 0.8.3, `brotli-decompressor` 5.0.0.
+- **Compiler-as-oracle (context7 still 403; APIs verified by the
+  loop + vendored crate source, not memory):** `just check` caught
+  E0106 (decode_with_limit lifetime — output borrows `body` only, not
+  `headers`; named `'b`), E0433 (`ruzstd::StreamingDecoder` wrong path
+  → resolved to `ruzstd::decoding::StreamingDecoder::new(READ) ->
+  Result` from the vendored 0.8.3 source `decoding/mod.rs`), and a
+  clippy `elidable_lifetime_names` on `bounded`. Each fixed per the
+  compiler's own guidance; re-run GREEN.
+- **Design:** header-primary (`Content-Encoding`: gzip/x-gzip,
+  deflate→zlib, zstd, br — the ONLY signal for brotli/raw-deflate,
+  present on the live path) + magic-secondary (gzip 1f8b, zstd
+  28b52ffd, zlib CM=8 & %31 — survives the unheadered post-hoc path).
+  One shared `bounded()` reader enforces the SAME MAX_DECOMPRESSED
+  reject-wholesale bound across every codec. Single-token only;
+  chained/identity/unknown/fallible-init ⇒ raw (honest Layer-2).
+  Total, panic-free. Clean JSON matches no codec ⇒ Cow::Borrowed ⇒
+  F0/F2/F3 byte-identical.
+- **Suite:** `just check` clippy -D warnings 0; `just test` **105/105,
+  0 skipped** (+ per-codec round-trip, header-only brotli, magic_codec
+  /header_codec pins, corrupt/tiny/over-limit; step-B real-gzip still
+  PASS; F0/F2/F3 green). Fixtures `sample_{zstd,brotli}.bin` +
+  `sample_payload.json` are REAL python-zstandard/brotli artifacts.
+- **REAL end-to-end (green ≠ works):** real httpx client sending
+  `Content-Encoding: zstd|br|deflate` through `ctx run` → F1 decomposes
+  (`system·tool-schemas·history` + unused-tools indictment), NOT
+  Layer-2; `ctx open` round-trips each. $0 (natural /v1 path 404s
+  upstream; request captured+decoded before forward).

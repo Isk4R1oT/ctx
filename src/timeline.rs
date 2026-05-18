@@ -8,7 +8,7 @@
 use std::borrow::Cow;
 use std::io::Read;
 
-use flate2::read::MultiGzDecoder;
+use flate2::read::{MultiGzDecoder, ZlibDecoder};
 use serde::{Deserialize, Serialize};
 
 use crate::adapter::{Assembled, Provider};
@@ -31,37 +31,108 @@ fn redact(name: &str, value: &str) -> String {
 /// honest Layer-2), never silently truncate a body into the parser.
 const MAX_DECOMPRESSED: usize = 64 * 1024 * 1024;
 
-/// Decompress a captured request body when it is a gzip stream, bounded
-/// by `limit`. The trigger is the RFC 1952 magic (`1f 8b`), **not** the
-/// `Content-Encoding` header — request headers are not persisted
-/// (`store.rs`), so a saved session must stay decodable by content
-/// alone (this is the D-009 root cause: real clients gzip the request;
-/// the pre-fix `from_utf8_lossy` destroyed those bytes before parse).
-/// Total and panic-free: not-gzip / corrupt / truncated / over-limit all
-/// return `body` unchanged (genuine opaque ⇒ legitimate Layer-2). A
-/// valid-JSON body never starts with `1f 8b`, so clean captures are
-/// byte-identical (F0/F2/F3 unaffected).
-fn decode_with_limit(body: &[u8], limit: usize) -> Cow<'_, [u8]> {
-    // Slice-pattern (not `len()`+indexing): no possible out-of-bounds,
-    // and no `<`/`||`/index operators for a mutant to silently flip.
-    if !matches!(body.get(..2), Some([0x1f, 0x8b])) {
-        return Cow::Borrowed(body);
+/// Transport `Content-Encoding`s decoded at the capture boundary.
+/// `deflate` maps to zlib (RFC 1950) — the de-facto meaning servers/
+/// clients use; a true raw-RFC1951 body has no header disambiguation
+/// and no magic, so it stays honest-Layer-2 (no real request-body case
+/// observed). gzip is the only encoding seen on a real LLM request in
+/// the wild; zstd/br/deflate support is defensive (D-009 follow-up).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Codec {
+    Gzip,
+    Zlib,
+    Zstd,
+    Brotli,
+}
+
+/// `Content-Encoding` value → codec. A single token only: a chained
+/// encoding (`gzip, br`) or `identity`/unknown ⇒ `None` ⇒ raw kept
+/// (honest Layer-2 — never a half-decoded prompt to the parser).
+fn header_codec(headers: &[(String, String)]) -> Option<Codec> {
+    let v = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))?
+        .1
+        .trim();
+    match v.to_ascii_lowercase().as_str() {
+        "gzip" | "x-gzip" => Some(Codec::Gzip),
+        "deflate" => Some(Codec::Zlib),
+        "zstd" => Some(Codec::Zstd),
+        "br" => Some(Codec::Brotli),
+        _ => None,
     }
+}
+
+/// Content sniff for the header-independent path (`store.rs` does not
+/// persist headers; the gzip-by-magic case is the D-009 root cause).
+/// Only formats with an unambiguous prefix: gzip `1f 8b`, zstd
+/// `28 b5 2f fd`, zlib (`CM=8` + the RFC 1950 `%31` check). Brotli and
+/// raw-deflate have no magic ⇒ header-only ⇒ otherwise honest-Layer-2.
+fn magic_codec(body: &[u8]) -> Option<Codec> {
+    match body {
+        [0x1f, 0x8b, ..] => Some(Codec::Gzip),
+        [0x28, 0xb5, 0x2f, 0xfd, ..] => Some(Codec::Zstd),
+        // RFC 1950: low nibble of byte0 = 8 (deflate), and the 16-bit
+        // big-endian (byte0,byte1) is a multiple of 31.
+        [b0, b1, ..]
+            if b0 & 0x0f == 0x08
+                && b0 & 0x80 == 0
+                && ((u16::from(*b0) << 8) | u16::from(*b1)) % 31 == 0 =>
+        {
+            Some(Codec::Zlib)
+        }
+        _ => None,
+    }
+}
+
+/// Read `r` to end, bounded by `limit`. `take(limit + 1)`: a stream that
+/// yields more than `limit` is rejected **wholesale** (raw kept) — a
+/// truncated/partial prompt must never reach the structured parser
+/// (that would be a fabricated decomposition). Total, panic-free.
+fn bounded<R: Read>(mut r: R, body: &[u8], limit: usize) -> Cow<'_, [u8]> {
     let mut out = Vec::new();
-    // `take(limit + 1)`: if the stream yields more than `limit` the body
-    // is rejected wholesale — a truncated/partial prompt must never reach
-    // the structured parser (that would be a fabricated decomposition).
     let cap = (limit as u64).saturating_add(1);
-    let mut bounded = MultiGzDecoder::new(body).take(cap);
-    match bounded.read_to_end(&mut out) {
+    match r.by_ref().take(cap).read_to_end(&mut out) {
         Ok(_) if out.len() <= limit => Cow::Owned(out),
         _ => Cow::Borrowed(body),
     }
 }
 
+/// Decompress a captured request body, bounded by `limit`. Codec is the
+/// `Content-Encoding` header first (the only signal for brotli/
+/// raw-deflate, present on the live `ctx run` path), then a content
+/// magic sniff (header-independent — survives the unheadered post-hoc
+/// path). Total and panic-free: no codec / corrupt / truncated /
+/// over-limit / fallible-init all return `body` unchanged (genuine
+/// opaque ⇒ legitimate Layer-2). A valid-JSON body matches no codec, so
+/// clean captures are byte-identical (F0/F2/F3 unaffected) — this is
+/// the D-009 fix generalized beyond gzip.
+fn decode_with_limit<'b>(
+    headers: &[(String, String)],
+    body: &'b [u8],
+    limit: usize,
+) -> Cow<'b, [u8]> {
+    let Some(codec) = header_codec(headers).or_else(|| magic_codec(body)) else {
+        return Cow::Borrowed(body);
+    };
+    match codec {
+        Codec::Gzip => bounded(MultiGzDecoder::new(body), body, limit),
+        Codec::Zlib => bounded(ZlibDecoder::new(body), body, limit),
+        Codec::Brotli => bounded(
+            brotli_decompressor::Decompressor::new(body, 4096),
+            body,
+            limit,
+        ),
+        Codec::Zstd => match ruzstd::decoding::StreamingDecoder::new(body) {
+            Ok(dec) => bounded(dec, body, limit),
+            Err(_) => Cow::Borrowed(body),
+        },
+    }
+}
+
 /// Production decode at the capture boundary (`MAX_DECOMPRESSED` cap).
-fn decode_request_body(body: &[u8]) -> Cow<'_, [u8]> {
-    decode_with_limit(body, MAX_DECOMPRESSED)
+fn decode_request_body<'b>(headers: &[(String, String)], body: &'b [u8]) -> Cow<'b, [u8]> {
+    decode_with_limit(headers, body, MAX_DECOMPRESSED)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,7 +190,7 @@ impl Timeline {
         // blinding F1 and destroying the bytes irrecoverably (D-009).
         // Clean bodies have no gzip magic ⇒ borrowed unchanged ⇒
         // byte-identical capture (F0/F2/F3 zero-regression).
-        let decoded = decode_request_body(body);
+        let decoded = decode_request_body(headers, body);
         let body = String::from_utf8_lossy(&decoded).into_owned();
         let provider = Provider::detect(path, headers);
         let assembled = match provider {
@@ -187,6 +258,12 @@ impl Timeline {
 mod tests {
     use super::*;
 
+    const NOH: &[(String, String)] = &[];
+
+    fn hdr(enc: &str) -> Vec<(String, String)> {
+        vec![("Content-Encoding".to_string(), enc.to_string())]
+    }
+
     fn gzip(bytes: &[u8]) -> Vec<u8> {
         use std::io::Write;
         let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -194,34 +271,100 @@ mod tests {
         e.finish().unwrap()
     }
 
+    fn zlib(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(bytes).unwrap();
+        e.finish().unwrap()
+    }
+
     #[test]
-    fn decode_passthrough_when_not_gzip() {
-        // A valid-JSON body never starts with 1f 8b ⇒ borrowed, identical
-        // ⇒ F0/F2/F3 byte-identical (the zero-regression guarantee).
+    fn decode_passthrough_when_no_codec() {
+        // A valid-JSON body matches no codec (header or magic) ⇒ borrowed,
+        // identical ⇒ F0/F2/F3 byte-identical (the zero-regression rule).
         let json = br#"{"model":"m","messages":[]}"#;
-        let got = decode_request_body(json);
-        assert!(matches!(got, Cow::Borrowed(_)), "clean body must be untouched");
+        let got = decode_request_body(NOH, json);
+        assert!(matches!(got, Cow::Borrowed(_)), "clean body untouched");
         assert_eq!(&*got, json);
+        // An unknown / chained / identity Content-Encoding ⇒ raw (never a
+        // half-decoded prompt). A `br` header on non-brotli ⇒ raw, no panic.
+        for enc in ["identity", "gzip, br", "snappy", ""] {
+            assert_eq!(&*decode_request_body(&hdr(enc), json), json, "enc={enc:?}");
+        }
+        assert_eq!(&*decode_request_body(&hdr("br"), json), json);
     }
 
     #[test]
-    fn decode_roundtrips_real_gzip() {
-        let payload = br#"{"model":"gpt","messages":[{"role":"user","content":"hello there"}]}"#;
-        let gz = gzip(payload);
-        let got = decode_request_body(&gz);
-        assert_eq!(&*got, payload, "gzip body must decompress to the original");
+    fn decode_roundtrips_gzip_and_zlib_by_magic() {
+        // gzip (1f 8b) and zlib (CM=8 + %31) are header-independent —
+        // recovered by content alone (the unheadered post-hoc path).
+        let payload = br#"{"model":"gpt","messages":[{"role":"user","content":"hello there now"}]}"#;
+        assert_eq!(&*decode_request_body(NOH, &gzip(payload)), payload);
+        assert_eq!(&*decode_request_body(NOH, &zlib(payload)), payload);
     }
 
     #[test]
-    fn decode_keeps_raw_on_corrupt_or_truncated_gzip() {
-        // gzip magic but garbage after ⇒ undecodable ⇒ raw kept (honest
+    fn decode_roundtrips_real_zstd_fixture_by_magic() {
+        // Real python-zstandard artifact (magic 28 b5 2f fd).
+        let want = include_bytes!("../tests/fixtures/sample_payload.json");
+        let zst = include_bytes!("../tests/fixtures/sample_zstd.bin");
+        assert_eq!(&zst[..4], &[0x28, 0xb5, 0x2f, 0xfd], "fixture must be real zstd");
+        assert_eq!(&*decode_request_body(NOH, zst), &want[..]);
+    }
+
+    #[test]
+    fn decode_roundtrips_real_brotli_fixture_via_header_only() {
+        // Brotli has NO magic ⇒ ONLY the Content-Encoding header can
+        // trigger it (proves the header-primary path; magic alone fails).
+        let want = include_bytes!("../tests/fixtures/sample_payload.json");
+        let br = include_bytes!("../tests/fixtures/sample_brotli.bin");
+        assert_eq!(&*decode_request_body(&hdr("br"), br), &want[..], "br via header");
+        assert!(
+            matches!(decode_request_body(NOH, br), Cow::Borrowed(_)),
+            "brotli without the header is correctly NOT sniffed (honest Layer-2)"
+        );
+    }
+
+    #[test]
+    fn magic_codec_pins_each_prefix() {
+        assert_eq!(magic_codec(&[0x1f, 0x8b, 0, 0]), Some(Codec::Gzip));
+        assert_eq!(magic_codec(&[0x28, 0xb5, 0x2f, 0xfd]), Some(Codec::Zstd));
+        // zlib: 0x78 0x9c → (0x789c % 31 == 0), CM=8 ⇒ Zlib.
+        assert_eq!(magic_codec(&[0x78, 0x9c, 1, 2]), Some(Codec::Zlib));
+        // CM=8 but checksum NOT a multiple of 31 ⇒ not zlib (pins %31).
+        assert_eq!(magic_codec(&[0x78, 0x9d, 1, 2]), None);
+        // low nibble != 8 ⇒ not zlib even if %31 holds.
+        assert_eq!(magic_codec(b"{\"a\"}"), None);
+        assert_eq!(magic_codec(&[]), None);
+    }
+
+    #[test]
+    fn header_codec_maps_single_tokens_only() {
+        for (t, c) in [
+            ("gzip", Codec::Gzip),
+            ("x-gzip", Codec::Gzip),
+            ("DEFLATE", Codec::Zlib),
+            ("zstd", Codec::Zstd),
+            (" Br ", Codec::Brotli),
+        ] {
+            assert_eq!(header_codec(&hdr(t)), Some(c), "token {t:?}");
+        }
+        for t in ["identity", "gzip, br", "snappy", ""] {
+            assert_eq!(header_codec(&hdr(t)), None, "token {t:?} must be None");
+        }
+        assert_eq!(header_codec(NOH), None);
+    }
+
+    #[test]
+    fn decode_keeps_raw_on_corrupt_or_truncated() {
+        // Codec-detected but garbage ⇒ undecodable ⇒ raw kept (honest
         // Layer-2), never a panic, never a partial body to the parser.
-        let mut bad = gzip(b"some real body bytes");
+        let mut bad = gzip(b"some real body bytes here");
         bad.truncate(bad.len() / 2);
-        let got = decode_request_body(&bad);
-        assert_eq!(&*got, bad.as_slice(), "corrupt gzip ⇒ raw bytes kept");
+        assert_eq!(&*decode_request_body(NOH, &bad), bad.as_slice());
+        assert_eq!(&*decode_request_body(&hdr("zstd"), b"\x28\xb5\x2f\xfdnope"), b"\x28\xb5\x2f\xfdnope");
         let fake = [0x1f, 0x8b, 0x00, 0x01, 0x02];
-        assert_eq!(&*decode_request_body(&fake), &fake);
+        assert_eq!(&*decode_request_body(NOH, &fake), &fake);
     }
 
     #[test]
@@ -236,11 +379,10 @@ mod tests {
 
     #[test]
     fn decode_tiny_inputs_are_borrowed_unchanged_no_panic() {
-        // Sub-2-byte / partial-magic inputs must be returned untouched
-        // without panicking (no len()/index OOB) — pins the slice-guard.
-        for b in [&b""[..], &b"{"[..], &[0x1f][..], &[0x1f, 0x8b][..]] {
-            let got = decode_request_body(b);
-            assert_eq!(&*got, b, "tiny input {b:?} must pass through verbatim");
+        // Sub-magic-length / partial inputs must be returned untouched
+        // without panicking (slice patterns, no index OOB).
+        for b in [&b""[..], &b"{"[..], &[0x1f][..], &[0x1f, 0x8b][..], &[0x28, 0xb5][..]] {
+            assert_eq!(&*decode_request_body(NOH, b), b, "tiny {b:?} verbatim");
         }
     }
 
@@ -252,8 +394,8 @@ mod tests {
         // attacker-`ctx open` decompression-bomb bound.
         let big = vec![b'a'; 4096];
         let gz = gzip(&big);
-        assert_eq!(decode_with_limit(&gz, 64), Cow::Borrowed(gz.as_slice()));
-        assert_eq!(&*decode_with_limit(&gz, 1 << 20), big.as_slice());
+        assert_eq!(decode_with_limit(NOH, &gz, 64), Cow::Borrowed(gz.as_slice()));
+        assert_eq!(&*decode_with_limit(NOH, &gz, 1 << 20), big.as_slice());
     }
 
     #[test]
