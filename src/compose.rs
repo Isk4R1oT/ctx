@@ -206,6 +206,7 @@ fn indict(timeline: &Timeline) -> Vec<Indictment> {
         indict_unpruned_history(timeline),
         indict_preamble_repay(timeline),
         indict_cache_prefix_break(timeline),
+        indict_request_replayed(timeline),
     ]
     .into_iter()
     .flatten()
@@ -492,6 +493,84 @@ fn indict_preamble_repay(timeline: &Timeline) -> Option<Indictment> {
         detail: format!(
             "system prompt re-paid: {extra_payments} extra payment(s) across {} variant(s)",
             repaid.len()
+        ),
+        wasted_tokens: wasted,
+    })
+}
+
+/// C6 (D-013) — same-body re-send / retry-replay. PURE MEASUREMENT: the
+/// re-billed token cost of a body sent verbatim more than once, given its
+/// per-copy token count and how many times it occurred. `extra_copies` =
+/// `occurrences - 1` is computed by the caller from a count map (no hand
+/// comparison for a mutant to flip); this is the cost arithmetic only,
+/// kept pure + saturating + isolated so the approximate tokenizer cannot
+/// reach this boundary through `compose()` (the proven D-010 technique).
+/// `0` means "no re-billed cost" (a lone send, or empty body) and the
+/// caller drops it — it is NEVER an indictment.
+fn replay_wasted(body_tokens: usize, extra_copies: usize) -> usize {
+    body_tokens.saturating_mul(extra_copies)
+}
+
+/// C6 (D-013) — `request-replayed`. A retry after a 429/5xx or an
+/// idempotent re-issue emitted by an HTTP/framework layer *below* the
+/// user's code re-sends the SAME assembled prompt verbatim; only the
+/// wire shows it and only a cross-step holder can detect the duplicate.
+/// Whole-body sibling of `repeated-block-across-turns` (that is a message
+/// block repeated across turns; this is the ENTIRE request body re-sent —
+/// a distinct waste class). Strictly PURE MEASUREMENT: full-body
+/// byte-equality + occurrence count + the re-billed token weight + the
+/// ALREADY-BUFFERED response status of the replayed attempt (F0 buffers
+/// responses; request-only for the core fact). It BORDERS `guard`'s
+/// territory — `ctx` only REPORTS the fact; it NEVER throttles /
+/// circuit-breaks / intervenes (that is `guard`; EXCLUDED, research §c/d).
+fn indict_request_replayed(timeline: &Timeline) -> Option<Indictment> {
+    // Group steps by verbatim request body. Empty bodies carry no
+    // re-billed prompt cost (role-glue / a non-prompt POST) — excluded
+    // by the `is_empty` filter, mirroring the MIN_BLOCK_BYTES discipline
+    // of the block rules.
+    let mut by_body: std::collections::BTreeMap<&str, Vec<&crate::timeline::Step>> =
+        std::collections::BTreeMap::new();
+    for s in &timeline.steps {
+        if !s.request.body.is_empty() {
+            by_body.entry(s.request.body.as_str()).or_default().push(s);
+        }
+    }
+    // A replayed body = one that occurred in >=2 steps. `Vec::len` and
+    // the std `filter` give the count; no hand-written comparison.
+    let replayed: Vec<(&&str, &Vec<&crate::timeline::Step>)> =
+        by_body.iter().filter(|(_, steps)| steps.len() >= 2).collect();
+    if replayed.is_empty() {
+        return None;
+    }
+    let distinct = replayed.len();
+    // Total re-billed copies across all replayed bodies (each body's
+    // `len() - 1` extra copies) and the matching token cost.
+    let extra_copies = sat_sum(replayed.iter().map(|(_, steps)| steps.len() - 1));
+    let wasted = sat_sum(replayed.iter().map(|(body, steps)| {
+        replay_wasted(crate::tokenizer::count(body), steps.len() - 1)
+    }));
+    if wasted == 0 {
+        return None; // no real re-billed prompt cost (degenerate body)
+    }
+    // Annotate the buffered status of the *replayed* attempt: the
+    // most-replayed body's FIRST occurrence (the attempt that was retried
+    // — research §c: "step 5 == step 4 body; step 4 returned 529"). std
+    // `max_by_key` — no hand comparison for a mutant to flip.
+    let worst = replayed
+        .iter()
+        .max_by_key(|(_, steps)| steps.len())
+        .map(|(_, steps)| *steps);
+    let status_note = worst
+        .and_then(|steps| steps.first())
+        .and_then(|first| first.response.as_ref())
+        .map_or_else(
+            || "; replayed attempt status not captured".to_string(),
+            |r| format!("; first replayed attempt returned {}", r.status),
+        );
+    Some(Indictment {
+        code: "request-replayed".to_string(),
+        detail: format!(
+            "{extra_copies} request body re-send(s) across {distinct} distinct body/ies, re-billed verbatim{status_note}"
         ),
         wasted_tokens: wasted,
     })
@@ -1077,6 +1156,21 @@ mod tests {
     // replayed attempt. Whole-body sibling of repeated-block-across-turns.
     // It REPORTS the fact only — it must NEVER throttle / circuit-break /
     // intervene (that is `guard`; EXCLUDED here, research §c/§d).
+
+    #[test]
+    fn replay_wasted_exact_boundaries() {
+        // Deterministic exact-value table for the isolated cost decision
+        // (the approximate tokenizer cannot hit these boundaries through
+        // compose(); the D-010 technique). Each row kills a mutant on
+        // the multiply / saturation.
+        assert_eq!(replay_wasted(0, 5), 0); // empty body ⇒ no cost
+        assert_eq!(replay_wasted(100, 0), 0); // lone send ⇒ no extra copy
+        assert_eq!(replay_wasted(7, 1), 7); // one re-bill = one copy (kills `*`→`-`: 7-1=6)
+        assert_eq!(replay_wasted(7, 3), 21); // kills `*`→`+`(10) / `-`(4) / `/`(2) / `%`(1)
+        // saturating: an attacker `ctx open` body must not panic/wrap.
+        assert_eq!(replay_wasted(usize::MAX, 2), usize::MAX);
+        assert_eq!(replay_wasted(usize::MAX, 0), 0);
+    }
 
     #[test]
     fn request_replayed_fires_on_a_byte_identical_resend_with_status() {
