@@ -43,10 +43,13 @@ const MAX_BODY: usize = 64 * 1024 * 1024;
 #[derive(Clone)]
 pub struct ProxyState {
     pub client: reqwest::Client,
-    /// Origin (`scheme://host[:port]`) of the real Anthropic upstream.
-    pub anthropic_origin: String,
-    /// Origin of the real OpenAI-compatible upstream.
-    pub openai_origin: String,
+    /// Full base URL (`scheme://host[:port][/path]`, trailing `/`
+    /// trimmed) of the real Anthropic upstream — **path preserved**
+    /// (D-017); forward = this + the verbatim request path.
+    pub anthropic_base: String,
+    /// Full base URL of the real OpenAI-compatible upstream — path
+    /// preserved (D-017); forward = this + the verbatim request path.
+    pub openai_base: String,
     pub timeline: Arc<Mutex<Timeline>>,
 }
 
@@ -117,11 +120,13 @@ async fn forward(state: ProxyState, req: Request) -> crate::Result<Response> {
         tl.record_request(method.as_str(), &path, &req_headers, &body_bytes)
     };
 
-    let origin = match provider {
-        Some(Provider::Anthropic) => &state.anthropic_origin,
-        Some(Provider::OpenAiCompat) | None => &state.openai_origin,
+    let base = match provider {
+        Some(Provider::Anthropic) => &state.anthropic_base,
+        Some(Provider::OpenAiCompat) | None => &state.openai_base,
     };
-    let url = format!("{}{}", origin.trim_end_matches('/'), path_and_query);
+    // Verbatim forward: full upstream base (path preserved, D-017) +
+    // the client's request path exactly as sent to the proxy ROOT.
+    let url = format!("{}{}", base.trim_end_matches('/'), path_and_query);
 
     let fwd_method = reqwest::Method::from_bytes(method.as_str().as_bytes())
         .map_err(|e| crate::Error::Adapter(format!("method: {e}")))?;

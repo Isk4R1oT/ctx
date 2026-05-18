@@ -20,13 +20,20 @@ pub struct RunOutcome {
     pub exit_code: i32,
 }
 
-fn origin_of(raw: &str, fallback: &str) -> String {
+/// The full upstream base — `scheme://host[:port][/path]` with any
+/// trailing `/` trimmed, **path preserved** (D-017 root-cause fix).
+/// `origin_of` used to strip the path, breaking every provider whose
+/// base carries one (`OpenRouter` `/api/v1`, Azure
+/// `/openai/deployments/…`, sub-path gateways). Unparseable / empty /
+/// `null`-origin ⇒ the fallback (never a silently-wrong upstream).
+fn base_of(raw: &str, fallback: &str) -> String {
     let candidate = if raw.is_empty() { fallback } else { raw };
-    reqwest::Url::parse(candidate)
-        .ok()
-        .map(|u| u.origin().ascii_serialization())
-        .filter(|o| o != "null")
-        .unwrap_or_else(|| fallback.to_string())
+    match reqwest::Url::parse(candidate) {
+        Ok(u) if u.origin().ascii_serialization() != "null" => {
+            candidate.trim_end_matches('/').to_string()
+        }
+        _ => fallback.to_string(),
+    }
 }
 
 fn env_or(keys: &[&str]) -> String {
@@ -53,13 +60,16 @@ pub async fn execute(command: &[String]) -> crate::Result<RunOutcome> {
         ));
     };
 
-    let anthropic_origin = origin_of(
+    let anthropic_base = base_of(
         &env_or(&["CTX_UPSTREAM_ANTHROPIC", "ANTHROPIC_BASE_URL"]),
         "https://api.anthropic.com",
     );
-    let openai_origin = origin_of(
+    // Default carries `/v1`: ctx now injects the proxy ROOT (no
+    // synthetic `/v1`), so the upstream base must hold the provider's
+    // real path itself (D-017).
+    let openai_base = base_of(
         &env_or(&["CTX_UPSTREAM_OPENAI", "OPENAI_BASE_URL", "OPENAI_API_BASE"]),
-        "https://api.openai.com",
+        "https://api.openai.com/v1",
     );
 
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -74,8 +84,8 @@ pub async fn execute(command: &[String]) -> crate::Result<RunOutcome> {
         .map_err(crate::Error::Upstream)?;
     let state = ProxyState {
         client,
-        anthropic_origin,
-        openai_origin,
+        anthropic_base,
+        openai_base,
         timeline: Arc::clone(&timeline),
     };
     let app = router(state);
@@ -94,13 +104,16 @@ pub async fn execute(command: &[String]) -> crate::Result<RunOutcome> {
         }
     });
 
+    // Inject the proxy ROOT (no synthetic `/v1`): the client builds its
+    // own provider path verbatim and ctx forwards
+    // `resolved_base + request_path` unchanged (D-017). This is what
+    // makes OpenRouter/Azure/sub-path bases work with zero hacks.
     let proxy_base = format!("http://127.0.0.1:{port}");
-    let openai_base = format!("{proxy_base}/v1");
     let status_res = tokio::process::Command::new(program)
         .args(args)
         .env("ANTHROPIC_BASE_URL", &proxy_base)
-        .env("OPENAI_BASE_URL", &openai_base)
-        .env("OPENAI_API_BASE", &openai_base)
+        .env("OPENAI_BASE_URL", &proxy_base)
+        .env("OPENAI_API_BASE", &proxy_base)
         .status()
         .await;
 
@@ -154,14 +167,23 @@ mod tests {
     }
 
     #[test]
-    fn origin_reduces_to_scheme_host() {
+    fn base_of_preserves_full_path() {
+        // Path PRESERVED (the D-017 root-cause fix — was stripped).
         assert_eq!(
-            origin_of("https://api.anthropic.com/v1", "x"),
-            "https://api.anthropic.com"
+            base_of("https://api.anthropic.com/v1", "x"),
+            "https://api.anthropic.com/v1"
         );
+        // Trailing slash trimmed; sub-path kept (OpenRouter shape).
         assert_eq!(
-            origin_of("", "https://api.openai.com"),
-            "https://api.openai.com"
+            base_of("https://openrouter.ai/api/v1/", "f"),
+            "https://openrouter.ai/api/v1"
         );
+        // Empty ⇒ fallback (returned verbatim, path intact).
+        assert_eq!(
+            base_of("", "https://api.openai.com/v1"),
+            "https://api.openai.com/v1"
+        );
+        // Unparseable ⇒ fallback (never a silently-wrong upstream).
+        assert_eq!(base_of("not a url", "https://fb"), "https://fb");
     }
 }

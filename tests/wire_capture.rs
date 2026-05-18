@@ -45,7 +45,9 @@ async fn captures_verbatim_wire_prompt_for_both_providers() {
     let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
         .args(["run", "--json", "--", "sh", "-c", &script])
         .env("CTX_UPSTREAM_ANTHROPIC", anthropic.uri())
-        .env("CTX_UPSTREAM_OPENAI", openai.uri())
+        // A real OpenAI-compatible upstream base carries its own `/v1`
+        // (D-017: ctx forwards base + verbatim path; no synthetic `/v1`).
+        .env("CTX_UPSTREAM_OPENAI", format!("{}/v1", openai.uri()))
         .env("NO_COLOR", "1")
         .output()
         .await
@@ -80,7 +82,9 @@ async fn captures_verbatim_wire_prompt_for_both_providers() {
 
     // OpenAI-compat step: verbatim body + correct detection.
     assert_eq!(steps[1]["provider"], "open_ai_compat");
-    assert_eq!(steps[1]["request"]["path"], "/v1/chat/completions");
+    // ctx injects the proxy ROOT (no synthetic `/v1`, D-017) ⇒ the
+    // captured path is exactly what the client sent.
+    assert_eq!(steps[1]["request"]["path"], "/chat/completions");
     assert_eq!(
         steps[1]["request"]["body"].as_str().unwrap(),
         OPENAI_BODY,
@@ -268,7 +272,9 @@ async fn f1_headline_works_on_a_real_openai_chat_completions_run() {
             "-c",
             &script,
         ])
-        .env("CTX_UPSTREAM_OPENAI", openai.uri())
+        // A real OpenAI-compatible upstream base carries its own `/v1`
+        // (D-017: ctx forwards base + verbatim path; no synthetic `/v1`).
+        .env("CTX_UPSTREAM_OPENAI", format!("{}/v1", openai.uri()))
         .env("NO_COLOR", "1")
         .output()
         .await
@@ -481,7 +487,6 @@ async fn run_requires_a_child_command() {
 // MUST fail pre-fix, pass post-fix. `#[ignore]` keeps the commit-gate
 // green at the red commit (un-ignored at the P1 fix commit).
 #[tokio::test]
-#[ignore = "P1/D-017 red: origin_of strips the upstream subpath; un-ignored at the P1 fix commit"]
 async fn forwards_verbatim_to_a_subpath_upstream() {
     // An OpenRouter-shaped upstream: the real base carries `/api/v1`.
     let openrouter = MockServer::start().await;
