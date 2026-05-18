@@ -1363,3 +1363,34 @@ REAL e2e (green ≠ works): all upstream env UNSET +
 F1 decomposes (zero env, the most discoverable form, self-documented
 via `--help`). `/rust-review`+`/rust-harden` substituted in-thread
 (D-008). No false green.
+
+### D-017 P4 — env injection: INTENTIONALLY MINIMAL (recognised set sufficient; honest hard limit recorded)
+
+Skeptical finding (decided 2026-05-18): P4 "broad env injection" is
+~95% ALREADY satisfied by P1's three injected vars —
+`OPENAI_BASE_URL` + `OPENAI_API_BASE` + `ANTHROPIC_BASE_URL` ARE the
+recognised base-URL set for the dominant clients (OpenAI Python/Node
+SDK, LangChain / LiteLLM-as-lib / older via `OPENAI_API_BASE`,
+Anthropic SDK, Vercel AI SDK, raw httpx/requests reading these). No
+code change: adding speculative provider-specific envs
+(`GROQ_BASE_URL`, `MISTRAL_BASE_URL`, …) is REJECTED — those SDKs
+mostly don't read them, and injecting an env a client constructs URLs
+from differently risks a SILENT MISROUTE (against the discipline; the
+moat is honesty, not coverage theatre).
+
+**Honest hard limit (recorded, not papered over).** `ctx run`'s
+env-injection captures only clients that read a base-URL env. An SDK
+with a HARDCODED base that reads no base-URL env (e.g. the Groq /
+Mistral / Cohere / Google-genai SDKs) is **not** capturable via
+`ctx run` — by construction, not a bug. Mitigations: point a client
+you control at the proxy via `--to`/`--provider`; or a system-proxy /
+CA-MITM interception — which is deliberately **out of the zero-config
+default** (it needs a local CA install ⇒ anti-"seconds"; an opt-in,
+honestly-labelled power-mode IF ever built, never the headline). P6's
+zero-capture self-diagnostic will name this case to the user
+explicitly (the honest, useful answer — not more env guessing).
+
+This is the caliper "knowing what NOT to build, with proof, is the
+top-0.01% signal" principle applied: P4 is closed as a recorded
+decision, no fragile code. Effort redirected to P5 (`ctx demo`) +
+P6 (self-diagnostic) — the real remaining UX levers.
