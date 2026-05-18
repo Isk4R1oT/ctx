@@ -1462,6 +1462,137 @@ mod tests {
         );
     }
 
+    // C4 (D-014) — param-drift. PURE MEASUREMENT: a sampling/decoding
+    // field's value CHANGES between two consecutive same-(provider,model)
+    // turns. Value (in)equality + named field + step index ONLY. It is a
+    // REPORTED FACT — never "this drift caused non-determinism / will
+    // change output" (that attribution is `agentlock`'s; EXCLUDED here,
+    // evalint KILLED). `absent ≠ a value`: a field present in one turn
+    // and omitted in the next is NOT a value change.
+    #[test]
+    // RED-FIRST (D-014): proven failing on worktree HEAD dc895aa (panic
+    // "a changed sampling field across same-(provider,model) turns MUST
+    // be indicted") while the full 135 suite stays green. `#[ignore]`
+    // keeps the commit-gate/suite green at the test commit; un-ignored
+    // in the impl commit (the D-010/D-013 red-first discipline).
+    #[ignore = "C4/D-014 red-first: param-drift not implemented yet (un-ignored at the impl commit)"]
+    fn param_drift_fires_only_when_a_tracked_field_value_changes() {
+        // FIRES — temperature changes between turn 0 and turn 1 under the
+        // SAME (provider, model). top_p stable.
+        let mut temp_drift = Timeline::new();
+        temp_drift.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"claude-x","system":"be terse and exact in answers","messages":[{"role":"user","content":"a reasonably long first user question here"}],"temperature":0.2,"top_p":1}"#,
+        );
+        temp_drift.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"claude-x","system":"be terse and exact in answers","messages":[{"role":"user","content":"a reasonably long second user question here"}],"temperature":0.9,"top_p":1}"#,
+        );
+        assert!(
+            has_code(&temp_drift, "param-drift"),
+            "a changed sampling field across same-(provider,model) turns MUST be indicted"
+        );
+        let d = compose(&temp_drift, false)
+            .indictments
+            .into_iter()
+            .find(|i| i.code == "param-drift")
+            .unwrap();
+        assert!(
+            d.detail.contains("temperature"),
+            "detail must name the drifted field: {}",
+            d.detail
+        );
+        assert!(
+            d.detail.contains("0.2") && d.detail.contains("0.9"),
+            "detail must report old->new: {}",
+            d.detail
+        );
+        assert!(
+            d.detail.contains("step 1"),
+            "detail must report the step index where it changed: {}",
+            d.detail
+        );
+
+        // NOT FIRES — every tracked field byte-stable across 2 turns
+        // (only the user message changes, which is NOT a sampling param).
+        let mut stable = Timeline::new();
+        stable.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"claude-x","system":"be terse","messages":[{"role":"user","content":"first stable-params question of a reasonable length"}],"temperature":0.2,"max_tokens":1024}"#,
+        );
+        stable.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"claude-x","system":"be terse","messages":[{"role":"user","content":"second stable-params question of a reasonable length"}],"temperature":0.2,"max_tokens":1024}"#,
+        );
+        assert!(
+            !has_code(&stable, "param-drift"),
+            "stable sampling params across turns must NOT be indicted"
+        );
+
+        // NOT FIRES — `absent ≠ a value`: temperature present in turn 0,
+        // omitted in turn 1 is NOT a value change (the spec's caveat).
+        let mut absent = Timeline::new();
+        absent.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"claude-x","system":"be terse","messages":[{"role":"user","content":"a reasonably long first user question here"}],"temperature":0.2}"#,
+        );
+        absent.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"claude-x","system":"be terse","messages":[{"role":"user","content":"a reasonably long second user question here"}]}"#,
+        );
+        assert!(
+            !has_code(&absent, "param-drift"),
+            "a field present then absent is NOT a value change (absent != a value)"
+        );
+
+        // NOT FIRES — a param change ACROSS a (provider,model) boundary
+        // is not a same-namespace drift (the agentlock-boundary caveat:
+        // a different model is a different determinism surface).
+        let mut crossns = Timeline::new();
+        crossns.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"claude-x","system":"be terse","messages":[{"role":"user","content":"a reasonably long first user question here"}],"temperature":0.2}"#,
+        );
+        crossns.record_request(
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            br#"{"model":"gpt-4o","messages":[{"role":"user","content":"a reasonably long second user question here"}],"temperature":0.9}"#,
+        );
+        assert!(
+            !has_code(&crossns, "param-drift"),
+            "a param change across a (provider,model) boundary is not same-namespace drift"
+        );
+
+        // NOT FIRES — a single step cannot drift (needs >=2 appearances
+        // in one namespace).
+        let mut one = Timeline::new();
+        one.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"claude-x","system":"be terse","messages":[{"role":"user","content":"only one step here"}],"temperature":0.2}"#,
+        );
+        assert!(
+            !has_code(&one, "param-drift"),
+            "one appearance cannot drift"
+        );
+    }
+
     // C1 (D-010) — cache-prefix-break. PURE MEASUREMENT: a short
     // identical leading prefix across consecutive same-provider+model
     // requests while a LARGE identical suffix proves the same context
