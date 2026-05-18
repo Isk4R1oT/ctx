@@ -529,3 +529,44 @@ async fn forwards_verbatim_to_a_subpath_upstream() {
         "the subpath upstream `/api/v1/chat/completions` MUST be hit verbatim (no path stripping)"
     );
 }
+
+// P2/D-017 — pins `execute()`'s `openai_explicit` polarity (kills the
+// `delete !` mutant): an EXPLICIT upstream MUST beat the key-prefix
+// registry even when the bearer key (`sk-or-…`) would otherwise
+// resolve to OpenRouter. Hermetic: the correct path hits the local
+// wiremock; the mutant would route to real openrouter.ai and miss it
+// (wiremock `.expect(1)` fails the test deterministically).
+#[tokio::test]
+async fn explicit_upstream_beats_the_key_registry() {
+    let explicit = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"x"})))
+        .expect(1)
+        .mount(&explicit)
+        .await;
+
+    // Bearer key whose prefix WOULD infer OpenRouter — explicit must win.
+    let script = format!(
+        "curl -s -o /dev/null -X POST \"$OPENAI_BASE_URL/chat/completions\" \
+            -H 'content-type: application/json' \
+            -H 'authorization: Bearer sk-or-v1-localtest' -d '{OPENAI_BODY}'"
+    );
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .args(["run", "--json", "--", "sh", "-c", &script])
+        .env("CTX_UPSTREAM_OPENAI", format!("{}/v1", explicit.uri()))
+        .env("NO_COLOR", "1")
+        .output()
+        .await
+        .expect("spawn ctx binary");
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let tl: Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let steps = tl["steps"].as_array().expect("steps");
+    assert_eq!(steps.len(), 1);
+    assert_eq!(
+        steps[0]["response"]["status"], 200,
+        "explicit upstream must be used verbatim — NOT the sk-or- registry inference"
+    );
+    // `explicit` MockServer `.expect(1)` is verified on drop here.
+}
