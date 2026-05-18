@@ -1224,3 +1224,46 @@ in-thread tool-grounded self-review + the real mutation gate,
 deliberately NOT subagent-delegated (the D-008 review-integrity
 incident). Recorded as a substitution, not an independent SHIP. No
 false green.
+
+## D-017 — Onboarding-UX overhaul: amends D-001's CLI surface; zero functionality lost (2026-05-18)
+
+### Status: LOCKED (design + scope). AMENDS D-001's canonical CLI surface (does NOT relitigate it). Binding plan: `docs/UX-OVERHAUL-BRIEF.md`. evalint stays KILLED; moat unchanged.
+
+**Why.** Onboarding is "complex / depends on what connects to what"
+because `run.rs::origin_of()` destroys the upstream PATH and nothing
+auto-resolves where to forward — so the user must hand-supply
+`CTX_UPSTREAM_*` + a client `/api/v1` hack + know the child must read
+`OPENAI_BASE_URL`. One correctness bug + one missing resolution layer
+= ~all the friction. Best practice (Stripe CLI, LiteLLM/Helicone,
+ngrok/uv): layered "configure nothing" — wire-inferred default → one
+flag → instant offline demo → self-diagnose → single binary.
+
+**Decision.** Full overhaul, phased P1–P6 (see the brief):
+P1 preserve full upstream path (root-cause + correctness fix:
+OpenRouter/Azure/sub-path gateways start working WITHOUT any hack);
+P2 tiny offline provider registry + auto-resolve by key/path/headers;
+P3 `--to`/`--provider` flags (the explicit D-001 CLI amend; legacy
+`CTX_UPSTREAM_*` kept working); P4 broad `*_BASE_URL` env injection;
+P5 `ctx demo` (offline, no key, all C1–C7 in ~2s — collapses the
+manual runbook); P6 zero-capture self-diagnostic + single-binary
+install.
+
+**Invariants (binding).** Zero functionality lost — every C1–C7 /
+F0–F3 behaviour + the D-005 `--json` contract byte-identical
+(snapshots verified). Strictly in the moat: pure routing +
+pure-measurement + offline fixtures; NO server/account/dashboard/
+scoring/judge; single static binary. Verbatim forwarding =
+full-path-preserving resolved base + the client's request path
+verbatim. Auto-resolution never guesses silently (unknown ⇒ explicit
+diagnostic, never a wrong upstream). MITM/CA mode is out of the
+default (anti-zero-config) — opt-in honest power mode only, if ever.
+Per-phase rust-cc discipline: TDD red-first proven, compiler-truth
+loop, 0-missed mutants on a REAL non-vacuous baseline, real e2e
+(green ≠ works), atomic commit, honest record. No false green.
+
+**Amendment scope vs D-001.** D-001 fixed the canonical wire-proxy
+verbs and rejected static-scan verbs; that remains. D-017 ADDS
+`--to`/`--provider` to `run` and a `demo` verb, and corrects the
+forward mechanism (path preservation). It does not reintroduce any
+D-001-rejected concept (no scan/lint/init, no server, no account).
+Recorded as an explicit amendment, not a silent contradiction.
