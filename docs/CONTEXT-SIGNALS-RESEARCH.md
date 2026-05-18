@@ -16,10 +16,15 @@
 > field + a DISTINCT component/indictment by EXACT wire byte weight +
 > block counts; base64 NOT decoded, the per-image token estimate
 > OMITTED ENTIRELY to stay strictly pure). C1/C2/C3/C4/C5/C6 are now
-> all implemented. **C7 deferred by decision (2026-05-18):** ranked LOW +
-> the honest `store.rs`-does-not-persist-request-headers substrate
-> blocker (shared F0 surface with agentlock/guard) — not built
-> rather than silently half-shipped.
+> all implemented. **C7 implemented LIVE-ONLY** (D-016 — tracked
+> request-header `header-drift`, twin of C4; auth already REDACTED;
+> `wasted_tokens` hard-0; evalint KILLED). `store.rs` does not
+> persist request headers (D-009) so `ctx open` of a saved session
+> honestly stays SILENT (never fabricated; proven on a real billed
+> artifact). The **full post-hoc C7 remains DEFERRED by decision
+> (2026-05-18)** — needs a `store.rs` header-allowlist persistence,
+> a shared F0 substrate co-owned by `agentlock`/`guard`; the
+> recorded extension point (D-016), not silently half-shipped.
 
 ---
 

@@ -1166,3 +1166,61 @@ prediction / SILENT on every existing snapshot) + the 2-pass real
 cargo-mutants evidence above; deliberately NOT subagent-delegated (the
 D-008 review-subagent integrity incident). Recorded as a substitution,
 not an independent SHIP. No false green.
+
+## D-016 — C7: header-drift, a pure-measurement F1 signal (LIVE-ONLY; full post-hoc deferred) (2026-05-18)
+
+### Status: LOCKED. Additive (PROJECT.md §8 versioned-ruleset seam). Does not relitigate D-001..D-015; evalint stays KILLED.
+
+**Why.** Determinism/identity request headers (`anthropic-version`,
+`anthropic-beta`, `openai-beta`, `content-encoding`, `accept-encoding`)
+are set/overridden by SDK/framework layers below the user's code; only
+the wire shows them, and only a cross-step holder can assert one
+silently changed mid-session. Research `CONTEXT-SIGNALS-RESEARCH.md`
+§c C7. Built **live-only** by explicit user decision (the full
+post-hoc form was the deferred option).
+
+**Rule (pure measurement).** `indict_header_drift`: structural twin of
+C4 `param-drift` — reuses the pure `param_change` + the
+`step_namespace` (provider,model) tuple gate (one tuple equality, no
+`&&` for a mutant to widen), sourced from `step.request.headers`,
+header names lower-cased (HTTP names are case-insensitive), compared
+only when a tracked header is PRESENT in both turns (`absent ≠ a
+value`). Emits `header-drift` naming header@step (old→new).
+`wasted_tokens` hard-`0` (a header change re-bills no prompt tokens —
+a determinism fact, not a token-waste class). A reported fact, NEVER a
+non-determinism claim (that attribution is `agentlock`'s — EXCLUDED;
+evalint KILLED). Auth/api-key/cookie are already `REDACTED` on capture
+(`timeline::SENSITIVE`); none of `TRACKED_HEADERS` is sensitive ⇒ no
+secret is ever surfaced (a `REDACTED`-in-both header simply never
+drifts).
+
+**LIVE-ONLY limit + the recorded extension point (honest, not buried).**
+`store.rs` does NOT persist request headers (D-009); `load()` replays
+with `&[]`. So `header-drift` works on a live `ctx run` (in-memory
+timeline has headers) and **honestly degrades to SILENCE on a post-hoc
+`ctx open` of a saved session** (no headers ⇒ no event ⇒ nothing
+fabricated). Proven on a REAL billed artifact: a live OpenRouter run
+(2× 200) with `accept-encoding` gzip→identity FIRED `header-drift`;
+`ctx open` of that same saved db was correctly SILENT (2 findings live
+→ 1 post-hoc). **The full post-hoc C7 is DEFERRED by decision
+(2026-05-18):** it requires a `store.rs` header-allowlist persistence —
+a shared F0-substrate change co-owned by `agentlock`/`guard` (D-009
+discipline: not silently folded in). This D-016 + the `TRACKED_HEADERS`
+doc-comment are the explicit recorded extension point.
+
+**Gates (real, non-vacuous).** TDD red-first (the behavioral test
+FAILED on `9eb5027` — no such indictment — proven; `#[ignore]`-with-
+reason kept the 142-suite green; un-ignored at the impl commit
+`a665cb2`). `just check` clippy `-D warnings` 0; `just test`
+**144/144, 0 skipped** + doctests; `cargo deny`/`machete` ok (no new
+deps — reuses `param_change`/`step_namespace`). cargo-mutants
+`--in-diff` on the C7 delta: REAL baseline `ok 23s build + 7s test`
+(non-vacuous), 7 mutants → 5 caught, 2 unviable, **0 missed**
+(by-construction tight: it reuses the already-hardened C4 helpers;
+`TRACKED_HEADERS` `black_box`-pinned; case-insensitive / untracked-
+ignored / different-model-silent / post-hoc-silent sub-cases).
+`/rust-review`+`/rust-harden` not invocable here → substituted by an
+in-thread tool-grounded self-review + the real mutation gate,
+deliberately NOT subagent-delegated (the D-008 review-integrity
+incident). Recorded as a substitution, not an independent SHIP. No
+false green.

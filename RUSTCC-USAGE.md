@@ -958,3 +958,31 @@ accepted. Pattern confirmed: worktree isolation is unreliable here
 (2 leaks + 1 full breach across 4 wave agents); the independent
 re-verify on main is what guarantees correctness, not the isolation
 mechanism or any self-report.
+
+---
+
+## C7 / D-016 — header-drift (LIVE-ONLY) + real-billed verification
+
+- rust-cc loop: TDD red-first (`9eb5027`, ignored, FAILED on HEAD —
+  proven, suite 142 green); compose-only impl (`a665cb2`), reuses the
+  already-hardened C4 `param_change` + `step_namespace`; PostToolUse
+  `rustcc` digest acted on; `just check` clippy `-D warnings` 0;
+  `just test` **144/144** + doctests; `cargo deny`/`machete` ok (NO
+  new deps).
+- cargo-mutants `--in-diff` (C7 delta), REAL baseline `ok 23s build +
+  7s test` (non-vacuous), 7 mutants → 5 caught, 2 unviable,
+  **0 missed** (by construction — the tuple gate / pure helper are
+  inherited from C4's hardening; `TRACKED_HEADERS` `black_box`-pinned;
+  case-insensitive / untracked-ignored / diff-model-silent / post-hoc-
+  silent sub-cases).
+- REAL billed e2e (green ≠ works): live OpenRouter, 2× HTTP 200, same
+  model+body, `Accept-Encoding` gzip→identity ⇒ live run FIRED
+  `header-drift accept-encoding@step 1 (gzip->identity)` (wasted 0);
+  `ctx open` of that SAVED db = correctly SILENT (2 findings live →
+  1 post-hoc) — the LIVE-ONLY limit demonstrated on a real artifact,
+  honest degradation, never fabricated.
+- `/rust-review`+`/rust-harden` not invocable → in-thread tool-grounded
+  self-review + the real mutation gate; NOT subagent-delegated (D-008
+  incident). Substitution recorded, not an independent SHIP. Done
+  in-thread (not a worktree agent — isolation proved unreliable 3×;
+  full control kept for this final small piece). No false green.
