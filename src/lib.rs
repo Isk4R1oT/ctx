@@ -13,6 +13,7 @@ pub mod color;
 pub mod compose;
 pub mod diff;
 pub mod proxy;
+pub mod registry;
 pub mod render;
 pub mod run;
 pub mod store;
