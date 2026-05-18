@@ -1267,3 +1267,35 @@ verbs and rejected static-scan verbs; that remains. D-017 ADDS
 forward mechanism (path preservation). It does not reintroduce any
 D-001-rejected concept (no scan/lint/init, no server, no account).
 Recorded as an explicit amendment, not a silent contradiction.
+
+### D-017 P1 — root-cause fix DONE (preserve full upstream path)
+
+`origin_of`→`base_of` (full `scheme://host[:port]/path`, trailing `/`
+trimmed, path PRESERVED; unparseable/empty/opaque-`null`-origin ⇒
+fallback, never a silently-wrong upstream). Proxy injects the ROOT for
+all `*_BASE_URL` (no synthetic `/v1`); forward = resolved base + the
+client's verbatim request path. `ProxyState` origin→base. openai
+default carries `/v1`. Integration contract STRENGTHENED (not weakened):
+the OpenAI upstream now carries its real `/v1`; the captured OpenAI
+path is the verbatim client path (`/chat/completions`, was the
+synthetic `/v1/chat/completions`); a new OpenRouter-`/api/v1` subpath
+integration test (RED on HEAD — proven) now passes.
+
+**Gates (real, non-vacuous).** TDD red-first (`8c315fa`, ignored,
+FAILED on HEAD — proven). `just check` clippy `-D warnings` 0 (the
+compiler-truth loop caught + fixed a `doc_markdown` nit). `just test`
+**145/145, 0 skipped** + doctests; F0/F1/F2/F3 + all snapshots
+byte-identical; `base_of` exact-pinned. cargo-mutants `--in-diff`
+(run.rs+proxy.rs): pass 1 REAL baseline `ok 28s build + 9s test`,
+7 mutants → **1 MISSED** (`!= "null"` opaque-origin guard → `true`).
+NOT accepted: the guard is load-bearing (rejects `data:`/`file:` as
+upstreams; removal would WEAKEN behaviour), so pinned by exact tests
+(`data:`/`file:` ⇒ fallback) rather than removed (`7b4bea8`). Pass 2
+REAL baseline `ok 19s build + 8s test`, 7 mutants → **6 caught,
+1 unviable, 0 missed**. REAL e2e (green ≠ works):
+`OPENAI_BASE_URL=https://openrouter.ai/api/v1 ctx run -- <natural
+client>` ⇒ live OpenRouter HTTP 200 + F1 decomposes, ZERO
+`CTX_UPSTREAM` / ZERO `/api/v1` client hack — the before→after UX win
+proven on real traffic. Commits `8c315fa` (red) `5897ec3` (fix)
+`7b4bea8` (harden). `/rust-review`+`/rust-harden` substituted in-thread
+(D-008 incident), not subagent-delegated. No false green.

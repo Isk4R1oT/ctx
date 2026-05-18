@@ -986,3 +986,26 @@ mechanism or any self-report.
   incident). Substitution recorded, not an independent SHIP. Done
   in-thread (not a worktree agent — isolation proved unreliable 3×;
   full control kept for this final small piece). No false green.
+
+---
+
+## P1 / D-017 — root-cause upstream-path fix (rust-cc, real e2e)
+
+- TDD red-first: `tests/wire_capture.rs::forwards_verbatim_to_a_
+  subpath_upstream` (OpenRouter `/api/v1` shape) — ignored, PROVEN
+  FAILED on HEAD (`8c315fa`).
+- Compiler-truth loop: `just check` first RED on a `clippy::
+  doc_markdown` nit (`OpenRouter` missing backticks) → fixed per the
+  lint → GREEN (`-D warnings` 0). `just test` 145/145 + doctests;
+  F0/F1/F2/F3 + snapshots byte-identical.
+- cargo-mutants `--in-diff` 2 passes, REAL baselines: pass 1
+  `ok 28s+9s` 7 mutants → 1 MISSED (null-origin guard); NOT accepted →
+  load-bearing guard pinned by exact `data:`/`file:`⇒fallback tests
+  (not removed). Pass 2 `ok 19s+8s` 7 → 6 caught, 1 unviable,
+  **0 missed**.
+- REAL e2e: `OPENAI_BASE_URL=https://openrouter.ai/api/v1 ctx run --
+  <natural httpx client>` ⇒ live OpenRouter **HTTP 200** + F1
+  decomposes, zero CTX_UPSTREAM / zero `/api/v1` hack (the before→after
+  UX win on real traffic).
+- `cargo deny`/`machete` ok (no new deps). `/rust-review`+`/rust-harden`
+  substituted in-thread, NOT subagent-delegated (D-008). No false green.
