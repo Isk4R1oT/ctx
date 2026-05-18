@@ -916,3 +916,45 @@ isolation breach — accepted. `.gitignore` now excludes
   evidence above; deliberately NOT subagent-delegated (the D-008
   review-subagent integrity incident). Recorded as a substitution,
   not an independent SHIP. No false green.
+
+---
+
+## C5 / D-015 — integration verification (working-tree leak detected + recovered; independently re-verified)
+
+Recorded honestly (not silently): C5's worktree COMMITS stayed isolated
+on `worktree-agent-af3637b69b7ece49a` (isolation held for commits), but
+a stray uncommitted Edit — C5's red-first `#[ignore]`d test — leaked
+into MAIN's `src/compose.rs` working copy (the agent's self-reported
+"first test Edit did not persist, re-applied" anomaly hit the main
+checkout; same class as the earlier C3 leak). Detected, NOT trusted
+from any tool "success":
+
+- `git merge --ff-only` ABORTED on the dirty tree; `just test` showed
+  "1 skipped" where pristine a973f0d had 0 — the tells.
+- `grep '#\[ignore'` pinned the stray C5 red test at compose.rs:2285.
+- Recovery: `git checkout -- src/compose.rs` ⇒ tree byte-identical to
+  committed a973f0d (0 diff); then a CLEAN `git merge --ff-only` of the
+  authoritative C5 branch (the leaked stray was stale garbage; the real
+  C5 — including that test un-ignored in the impl commit — is the 4
+  committed branch commits).
+
+Independent re-verification on integrated main `f1a0808` (NOT the agent
+self-report):
+- adapter.rs ADDITIVE-only (zero deletions; `Assembled.non_text` new
+  field mirrors C4's `sampling`); snapshot delta EXACTLY the additive
+  `"non_text": []` (comma-flip + new key, nothing removed) — D-005
+  `--json` contract intact.
+- `just test` 142/142, 0 skipped + doctests; `just check` clippy 0;
+  `cargo deny`/`machete` ok (no new deps).
+- cargo-mutants `--in-diff` on C5's delta, REAL baseline `ok 21s build
+  + 8s test` (non-vacuous), 25 mutants → 20 caught, 5 unviable,
+  **0 missed**.
+- Purity confirmed by read: pure `non_text_weight`/`kind_tally`,
+  `tokens: 0` + `wasted_tokens: 0` hard-zero by design, media token
+  estimate omitted (strictly pure), evalint stays KILLED.
+
+Conclusion: C5 correct and honestly green on main despite the leak —
+accepted. Pattern confirmed: worktree isolation is unreliable here
+(2 leaks + 1 full breach across 4 wave agents); the independent
+re-verify on main is what guarantees correctness, not the isolation
+mechanism or any self-report.
