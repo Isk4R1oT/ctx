@@ -512,3 +512,98 @@ prefix`); an identical stable prefix ⇒ correctly SILENT. `/rust-review`
 substituted by in-thread tool-grounded self-review (pure / total /
 char-safe / true-positive-gated) — deliberately NOT subagent-delegated
 (D-008 incident). Recorded as a substitution, not an independent SHIP.
+
+## D-013 — C6: request-replayed, a new pure-measurement F1 indictment (2026-05-18)
+
+### Status: LOCKED. Additive (the PROJECT.md §8 "versioned indictment ruleset" seam). Does not relitigate D-001..D-010; evalint stays KILLED; graph stays REFUTED.
+
+**Why.** A retry after a 429/5xx, or an idempotent re-issue, is emitted
+by an HTTP-client/framework layer *below* the user's code — the engineer
+usually cannot see that the SAME assembled prompt was re-sent verbatim,
+nor the real, re-billed token cost of it. Every incumbent treats retry
+storms as a *tracing* concern (count retry spans); none asserts "this
+exact assembled prompt was re-sent byte-for-byte, here is the duplicated
+token cost" from wire byte-equality, because their SDK→DB→dashboard
+architecture has no verbatim cross-step request timeline. `ctx` already
+holds every request body byte-exact (F0) and buffers responses (F0,
+D-004) — C6 is a hash-equality pass over data it already has, deepening
+the locked moat (composition+waste ∩ per-step diff ∩ zero-config wire
+capture), not drifting from it. Spec'd and ranked by the independent
+research artifact `docs/CONTEXT-SIGNALS-RESEARCH.md` §(c) C6.
+
+**Rule (pure measurement).** `indict_request_replayed`: group steps by
+the **verbatim request body** (non-empty only — an empty body carries no
+re-billed prompt cost, mirroring the block rules' `MIN_BLOCK_BYTES`
+discipline); a body occurring in `>= 2` steps is a replay. Reports the
+total re-billed copies (`Σ occurrences − 1`), the count of distinct
+replayed bodies, the duplicated token weight (`Σ tokenizer::count(body)
+× (occurrences − 1)`), and — from F0's ALREADY-BUFFERED response — the
+status of the *first occurrence of the most-replayed body* (the attempt
+that was retried; e.g. "first replayed attempt returned 529"), or an
+honest "status not captured" when no response was buffered (never a
+fabricated status). Strictly full-body byte-equality + counts +
+tokenizer sums + the buffered status — NO judge, NO score, NO prediction
+(evalint KILLED).
+
+**The `guard`-boundary (honest, load-bearing).** C6 BORDERS `guard`'s
+territory (the deterministic loop/cost circuit-breaker). `ctx` only
+**REPORTS the fact** — it MUST NEVER throttle, rate-limit, circuit-break,
+de-duplicate, or otherwise intervene/remediate. That is `guard` and is
+**EXCLUDED here by construction** (CONTEXT-SIGNALS-RESEARCH §c/§d; the
+function returns an `Option<Indictment>` and has no side effect, no
+network, no mutation of the timeline). This boundary is the reason C6 is
+request-only for the core fact and a pure measurement, not an action.
+
+**Honest limits (recorded, not buried).** (1) Whole-body **exact**
+byte-equality only — a retry that changed even one byte (e.g. an
+idempotency-key header is not in the body, but a per-attempt nonce in the
+body would be) is a deliberate honest false-negative (under-claims rather
+than over-claims; near-duplicate is contestable and EXCLUDED per
+research §d). (2) Token figures ride the offline ±N% tokenizer (labelled
+in the summary line); the byte-equality and counts are exact. (3)
+Request-only; needs >=2 steps. (4) The status annotation is the
+most-replayed body's *first* occurrence only (one representative status,
+not a per-attempt list — kept minimal and pure; `--deep` per-attempt
+status is a possible future seam, not built). (5) When the upstream is
+unreachable the proxy synthesizes a 502 and does **not** `record_response`
+(F0 forward-error path), so the annotation is the honest "status not
+captured" — observed and accepted in the real e2e, not hidden. (6)
+Streaming-vs-buffered does not affect C6 (request-side; D-004).
+
+**Scope (HALT condition checked, NOT triggered).** C6 reads only
+`step.request.body` / `step.response` / (no `Assembled` needed). It does
+**not** touch `adapter.rs::Assembled` or any shared F0 struct — no
+re-architecture, no F0/R regression (snapshots use two *different*
+bodies ⇒ C6 correctly silent there; all pre-existing snapshots
+unchanged). The HALT-if-it-needs-`Assembled` invariant was explicitly
+verified false before implementation.
+
+**Gates (real, non-vacuous).** TDD red-first: three `compose.rs` tests
+written and proven RED on worktree HEAD `410c790`
+(`request_replayed_*` → 2 failed / 1 control-pass) with the rest of the
+suite green (**109/109**), committed before the feature. `just check`
+clippy `-D warnings` **0**; `just test` **113/113** + doctests;
+`cargo deny`/`machete` ok (**no new deps** — reuses `tokenizer` + std).
+cargo-mutants `--in-diff` on the C6 surface, **two independent passes,
+both 0 missed on a REAL baseline**: pass 1 = **11 caught, 2 unviable,
+0 missed** (`Unmutated baseline ok 31s build + 8s test`); pass 2 =
+**11 caught, 2 unviable, 0 missed** (fresh `Unmutated baseline ok 40s
+build + 14s test`). 0-missed was reached **by construction** (proactive
+D-010 technique: the cost decision isolated in the pure
+`replay_wasted` helper with an exact-boundary unit table; std
+`filter(len()>=2)`/`max_by_key`/`sat_sum` instead of hand
+`<`/`||`/compound booleans; `!is_empty` + `wasted==0` guards) — NOT by
+post-hoc test patching; the 2 unviable are the non-compiling
+`Default::default()` return arms (genuinely unviable, not skipped).
+Real e2e through the `ctx` binary (real python httpx clients, no real
+key, DUMMY `Authorization: Bearer test`, natural
+`/v1/chat/completions`, $0): same body POSTed twice ⇒ **fires**
+(`request-replayed wasted_tokens=60`); two different bodies ⇒ correctly
+**SILENT**; `ctx open`/`--json` round-trip the indictment post-hoc; a
+local 529 upstream ⇒ the buffered-status path reports "first replayed
+attempt returned 529" (the research §c shape). `/rust-review` +
+`/rust-harden` not invocable in-thread → substituted by an in-thread
+tool-grounded self-review (pure / total / panic-free / saturating /
+byte-equality-only / zero `guard`-style intervention) — deliberately
+NOT subagent-delegated (D-008 review-subagent integrity incident).
+Recorded as a substitution, not an independent SHIP.

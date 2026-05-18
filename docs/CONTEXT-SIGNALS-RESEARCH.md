@@ -8,7 +8,9 @@
 >
 > **Status (current state).** C1 is **implemented** as the
 > `cache-prefix-break` F1 indictment — see `DECISIONS.md` D-010
-> (2026-05-18). C2–C7 remain ranked candidates (not yet built).
+> (2026-05-18). C6 is **implemented** as the `request-replayed` F1
+> indictment — see `DECISIONS.md` D-013 (2026-05-18). C2–C5, C7 remain
+> ranked candidates (not yet built).
 
 ---
 
