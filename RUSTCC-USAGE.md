@@ -398,3 +398,80 @@
   (byte-prefix identity ≠ a provider-cache guarantee; ±N% tokenizer;
   shared-suffix gate is a deliberate true-positive bias / honest
   false-negative), and that evalint stays KILLED. No false green.
+
+---
+
+## C2 / D-011 — component-drift indictment (new pure-measurement F1 rule)
+
+- **TDD red-first (COMPILER-TRUTH Law 1/11).** Failing compose.rs
+  behavioral test written FIRST. Proven RED on worktree HEAD `0a07bd4`:
+  `cargo nextest run compose::` → `FAIL … component_drift_fires_only_
+  when_a_same_named_component_mutates`, panic `a mutated system block
+  across steps MUST be indicted`, while the other **16 compose tests
+  PASS** and the full 109 suite stays green (only this new test red).
+  `#[ignore]`-with-reason at test commit `719cc81` (commit-gate +
+  suite stay green: clippy 0, 109/109 1-skipped); un-ignored in impl
+  commit `e87c0ff`.
+- **Compiler-truth loop (Law 1/3/4/5).** PostToolUse `rustcc gate` =
+  the signal after every `.rs` edit. Red-test edit → `cargo clippy
+  --all-targets -- -D warnings` GREEN (the test only uses public
+  `compose`/`has_code`, so it compiles and fails at *runtime* — the
+  clean TDD red). Impl edit (`drift_delta` + `indict_component_drift`
+  + `indict()` wiring + un-ignore + boundary table) → `just check`
+  clippy `-D warnings` **0** first pass (no error class to fix — the
+  helper was isolated by construction). No hand-rolled cargo; the loop
+  was the oracle throughout. No borrow/lifetime/trait/move class arose
+  (read-only walk over `&Timeline`, no `.clone()`-to-silence, Law 10).
+- **`just test` 111/111, 0 skipped** + doctests (was 109; +2 = the
+  un-ignored behavioral test + `component_drift_decision_exact_
+  boundaries`). Tests ASSERT real values (Law 11): names the drifted
+  component, the step index, a non-zero token delta, and pins the
+  renamed-tool=remove+add / single-step / stable-is-silent negatives.
+- **`just harden`.** `cargo deny` advisories/bans/licenses/sources
+  **ok**; `cargo machete` **no unused deps** — C2 added ZERO new deps
+  (stdlib `BTreeMap` + existing tokenizer). `cargo semver-checks` flags
+  the pre-existing crates.io `ctx` NAME COLLISION (PROJECT.md §11
+  pre-publish rename gate) — non-fatal in the justfile (`|| true`),
+  unrelated to C2.
+- **Mutation-hardening — 2 independent REAL non-vacuous baselines
+  (Law 11).** `cargo mutants --in-diff /tmp/c2.diff --test-tool
+  nextest --timeout 120`:
+  - Run 1: baseline `ok 71s build + 29s test` (REAL — not vacuous,
+    not timed-out), 10 mutants → **8 caught, 2 unviable, 0 MISSED**.
+  - Run 2: baseline `ok 41s build + 15s test` (REAL), 10 mutants →
+    **8 caught, 2 unviable, 0 MISSED** (stable across passes).
+  - 0 missed on pass 1 **by construction**: the decision was isolated
+    in the pure `drift_delta(prev,cur)` helper (ONE `==` + ONE
+    saturating abs-diff) with an exact-boundary unit table FROM THE
+    START (the D-010 technique applied preemptively) — so unlike D-010
+    (8 missed → restructure) no 2-pass restructuring was needed and
+    there is no equivalent mutant to eliminate. The 2 unviable are
+    non-compiling `Some(Default::default())` / `vec![Default::
+    default()]` substitutions (`Indictment`/`Vec` have no `Default`
+    there) — correctly unviable, NOT equivalent-and-missed.
+- **Real e2e (green ≠ works).** `cargo build` → `target/debug/ctx`.
+  A real 2-turn python `httpx` client via `ctx run --save` (dummy
+  `Authorization: Bearer test`, natural `/v1/chat/completions`;
+  upstream 404/conn-refused IGNORED — F0 captures the request BEFORE
+  forward; $0, no real key anywhere):
+  - **MODE=drift** (turn 2 mutates the system prompt, same
+    provider+model) ⇒ FIRES: `waste component-drift wasted_tokens=1
+    1 same-named component(s) mutated mid-session: system@step 1
+    (~1 tok changed; a renamed tool reads as remove+add, not drift)`.
+    Round-trips post-hoc via `ctx open /tmp/c2_drift.db` (same line).
+  - **MODE=stable** (byte-identical system on turn 2) ⇒ correctly
+    SILENT: only `preamble-repay`/`unused-loaded-tools` (C2 is
+    preamble-repay's OPPOSITE). Also silent post-hoc via `ctx open`.
+- **Pure measurement / evalint KILLED.** Only `==`/`!=`, `max/min`,
+  `saturating_sub`, the existing labeled ±N% tokenizer, `sat_sum`. No
+  judge, no prediction, no "model will forget X". No `Assembled` shape
+  change (reads only the existing `system` + named `tools`). `/rust-
+  review` not invocable in-thread ⇒ in-thread tool-grounded self-
+  review (pure / total / panic-free / deterministic `BTreeMap` /
+  no-`Assembled`-change / renamed=remove+add), deliberately NOT
+  subagent-delegated (D-008 incident). Substitution, not an
+  independent SHIP. No false green. Honest limit recorded in D-011:
+  tool drift is at `schema_tokens` granularity (a same-token-count
+  schema mutation is a deliberate honest false-negative — `Assembled`
+  carries no per-tool raw bytes and changing it is the goal HALT
+  condition); `system` drift is byte-exact.

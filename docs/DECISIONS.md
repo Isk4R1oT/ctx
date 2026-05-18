@@ -513,6 +513,105 @@ substituted by in-thread tool-grounded self-review (pure / total /
 char-safe / true-positive-gated) — deliberately NOT subagent-delegated
 (D-008 incident). Recorded as a substitution, not an independent SHIP.
 
+## D-011 — C2: component-drift, a new pure-measurement F1 indictment (2026-05-18)
+
+### Status: LOCKED. Additive (the PROJECT.md §8 "versioned indictment ruleset" seam). Does not relitigate D-001..D-010; evalint stays KILLED.
+
+**Why.** A framework silently mutating a component the engineer believes
+is stable — the `system` block, or a tool's schema — between turns of one
+live run is the #1 cause of both cache invalidation and a "stable"
+instruction changing under the engineer's feet. It is the OPPOSITE of
+`preamble-repay` (D-?, F1): that counts an *identical* component re-paid;
+C2 catches a same-NAMED component whose bytes/size CHANGE mid-session.
+Every incumbent has prompt-*version* diff (a registry concept: v1 vs v2
+of a managed prompt); none has "the same logical component changed bytes
+between step 3 and step 4 of one live run", because that needs the
+per-step verbatim wire timeline their SDK→DB→dashboard architecture does
+not have. Deepens the locked moat (per-step diff ∩ waste indictment ∩
+wire capture); ranked HIGH by `docs/CONTEXT-SIGNALS-RESEARCH.md` §(c) C2,
+whose definition / "pure-measurement?" / caveat this entry obeys exactly.
+
+**Rule (pure measurement).** `indict_component_drift`: walk steps in
+order; per component key (`system`, and each tool keyed by `tool:<name>`)
+compare its current fingerprint to its previous appearance. `system`
+fingerprints on its **exact bytes** (byte change ⇒ event; the byte delta
+is exact, the token delta is the labeled ±N% estimate). Each tool
+fingerprints on the **size the canonical `Assembled` view exposes**
+(`schema_tokens`). Emit one `component-drift` indictment iff >=1 same-
+named component mutated, listing each drifted component pinned to the
+FIRST step index where it changed (deterministic `BTreeMap` ordering) and
+the summed token delta. The per-appearance decision is isolated in the
+pure `drift_delta(prev,cur)` helper — ONE `==` + ONE saturating
+abs-difference — with an exact-boundary unit table (the approximate
+tokenizer cannot reach those values through `compose()`; the D-010
+technique applied preemptively). Strictly counts/bytes/tokenizer-sums/
+integer compares — NO prediction, NO "the model will forget X" (evalint
+KILLED; the lost-in-the-middle framing is the §(d) excluded class).
+
+**Honest limits (recorded, not buried).**
+- Tool drift is detected at the **tokenizer-size granularity** the
+  canonical `Assembled` view exposes, NOT at byte granularity:
+  `WireTool` carries `name` + `schema_tokens` only, not the raw schema
+  bytes. Re-deriving schema bytes in `compose.rs` would duplicate the
+  adapter (D-007/D-008) or require an `Assembled` shape change (the
+  goal's explicit HALT condition — a struct `agentlock`/`guard` share).
+  So a tool-schema mutation that leaves `schema_tokens` unchanged is a
+  **deliberate honest false-negative** (the D-010 true-positive-bias
+  discipline: under-claims rather than over-claims). `system` is exact
+  (full bytes are in `Assembled`).
+- The token figures ride the offline ±N% tokenizer; the `system`
+  byte-change detection itself is exact.
+- A renamed tool is a different key ⇒ remove+add, NEVER a drift event
+  (drift requires the SAME name to change). Asserted by a test and
+  stated verbatim in the `detail` string — not inferred (per §(c) C2
+  caveat).
+- Request-only; needs >=2 appearances of the same-named component.
+
+**No `Assembled` shape change (the HALT guard held).** C2 reads only
+`a.system` and `a.tools` — fields the canonical view already exposes.
+Zero new dependencies (stdlib `BTreeMap` + the existing tokenizer). The
+existing F1 snapshots are untouched: the snapshot fixture sends a
+byte-identical system + identical tools across both steps, so C2 is
+correctly SILENT there (it is `preamble-repay`'s opposite) — verified, no
+snapshot regeneration.
+
+**Indictment surface.** `code = "component-drift"`; one-line `detail`:
+`"<N> same-named component(s) mutated mid-session: <key>@step <ix>, … (~<T> tok changed; a renamed tool reads as remove+add, not drift)"`;
+`wasted_tokens` = saturating sum of the per-event absolute token deltas
+(matches the field's "per-rule measured waste", non-partition note).
+
+**Gates (real, non-vacuous).** TDD red-first: the failing compose.rs
+behavioral test was proven RED on worktree HEAD `0a07bd4` (panic "a
+mutated system block across steps MUST be indicted") while the other 16
+compose tests + the full 109 suite stayed green, recorded in
+RUSTCC-USAGE.md, `#[ignore]`-with-reason at the test commit `719cc81`,
+un-ignored in the impl commit `e87c0ff`. `just check` clippy `-D
+warnings` 0; `just test` **111/111, 0 skipped** + doctests (+2 vs the
+109 baseline = the un-ignored behavioral test + the `drift_delta`
+boundary table; zero regression — purely additive). `cargo deny`
+advisories/bans/licenses/sources ok; `cargo machete` no unused deps
+(no new deps). cargo-mutants `--in-diff` on the C2 surface, **two
+independent REAL non-vacuous baselines**: run 1 baseline `ok 71s build +
+29s test` → 10 mutants → **8 caught, 2 unviable, 0 MISSED**; run 2
+baseline `ok 41s build + 15s test` → **8 caught, 2 unviable, 0 MISSED**
+(stable). The 2 unviable are non-compiling `Default::default()`
+substitutions (correctly unviable, not equivalent-and-missed). 0 missed
+on pass 1 *by construction* — the decision was isolated in `drift_delta`
+from the start, so unlike D-010 no 2-pass restructuring was needed; no
+equivalent mutant to eliminate. Real e2e (green != works): a real 2-turn
+python httpx client through `ctx run --save` (dummy `Authorization:
+Bearer test`, natural `/v1/chat/completions`, upstream 404 ignored —
+request captured before forward, $0, no real key) — MODE=drift (turn 2
+mutates the system prompt under the same provider+model) ⇒ FIRES
+(`component-drift wasted_tokens=1 … system@step 1 (~1 tok changed …)`),
+and round-trips post-hoc through `ctx open`; MODE=stable (byte-identical
+system on turn 2) ⇒ correctly SILENT (only `preamble-repay`/
+`unused-loaded-tools` fire), also post-hoc. `/rust-review` not invocable
+in-thread ⇒ substituted by an in-thread tool-grounded self-review (pure
+/ total / panic-free / no `Assembled` change / deterministic / renamed-
+tool=remove+add) — deliberately NOT subagent-delegated (D-008 integrity
+incident). Recorded as a substitution, not an independent SHIP. No false
+green.
 ## D-013 — C6: request-replayed, a new pure-measurement F1 indictment (2026-05-18)
 
 ### Status: LOCKED. Additive (the PROJECT.md §8 "versioned indictment ruleset" seam). Does not relitigate D-001..D-010; evalint stays KILLED; graph stays REFUTED.
