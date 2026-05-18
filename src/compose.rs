@@ -207,6 +207,7 @@ fn indict(timeline: &Timeline) -> Vec<Indictment> {
         indict_preamble_repay(timeline),
         indict_cache_prefix_break(timeline),
         indict_request_replayed(timeline),
+        indict_component_drift(timeline),
     ]
     .into_iter()
     .flatten()
@@ -573,6 +574,105 @@ fn indict_request_replayed(timeline: &Timeline) -> Option<Indictment> {
             "{extra_copies} request body re-send(s) across {distinct} distinct body/ies, re-billed verbatim{status_note}"
         ),
         wasted_tokens: wasted,
+    })
+}
+
+/// C2 (D-011) — the pure per-appearance decision for ONE component:
+/// given the previous and current *size* of a same-named component, the
+/// drift magnitude iff it changed, else `None`. ONE equality + ONE
+/// absolute difference, isolated here so the only comparison/arithmetic
+/// is unit-pinnable at its exact boundary — the approximate tokenizer
+/// cannot reach these values through `compose()` (the D-010 technique).
+/// Pure measurement: integer (in)equality, no judgment.
+fn drift_delta(prev: usize, cur: usize) -> Option<usize> {
+    if prev == cur {
+        return None; // byte/size-identical re-payment ⇒ NOT drift
+    }
+    // Saturating abs-difference: waste math runs on attacker-influenced
+    // wire bytes (`ctx open` reads an unbounded saved session); it must
+    // never panic in debug nor wrap in release (the `sat_sum`/`pct`
+    // discipline). `prev != cur` here, so the result is always >= 1.
+    Some(prev.max(cur).saturating_sub(prev.min(cur)))
+}
+
+/// C2 (D-011) — component-drift. The OPPOSITE of `preamble-repay`: that
+/// counts an *identical* component re-paid; this catches a same-NAMED
+/// component (`system`, or a tool keyed by its name) whose bytes/size
+/// silently **mutate** between two of its appearances mid-session — the
+/// #1 cause of both cache invalidation and a "stable" instruction
+/// changing under the engineer's feet. Strictly PURE MEASUREMENT:
+/// per-component cross-step (in)equality + byte/token deltas + the step
+/// index; NO prediction, NO "the model will forget X" (evalint KILLED).
+///
+/// Component identity is keyed by NAME. `system` fingerprints on its
+/// exact bytes (so the byte delta is exact AND the token delta is the
+/// labeled ±N% estimate). Each tool fingerprints on the size the
+/// canonical `Assembled` view exposes (`schema_tokens`) — the byte
+/// granularity is not carried by `Assembled` and is NOT re-derived here
+/// (that would duplicate the adapter / require an `Assembled` shape
+/// change — explicitly out of scope, D-001/D-007/D-008); a same-token-
+/// count schema mutation is therefore a deliberate honest false-negative
+/// (the D-010 true-positive-bias discipline). A renamed tool is a
+/// different key ⇒ remove+add, never a drift event — stated, not
+/// inferred (per the C2 spec caveat).
+fn indict_component_drift(timeline: &Timeline) -> Option<Indictment> {
+    // Per component key → its size at the previous appearance. `system`
+    // also keeps the previous bytes so the byte delta is exact.
+    let mut prev_tool: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut prev_sys: Option<(usize, String)> = None;
+    // Distinct components that drifted, each pinned to the FIRST step
+    // index where it changed (a BTreeMap ⇒ deterministic ordering).
+    let mut first_drift: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut deltas: Vec<usize> = Vec::new();
+
+    for s in &timeline.steps {
+        let Some(a) = &s.assembled else { continue };
+        // system — exact-byte fingerprint (only when present & non-empty,
+        // matching `preamble-repay`'s "a system block exists" gate).
+        if let Some(sys) = a.system.as_deref().filter(|x| !x.is_empty()) {
+            let cur = crate::tokenizer::count(sys);
+            if let Some((prev_tok, prev_bytes)) = prev_sys.as_ref() {
+                if prev_bytes != sys {
+                    if let Some(d) = drift_delta(*prev_tok, cur) {
+                        first_drift.entry("system".to_string()).or_insert(s.index);
+                        deltas.push(d);
+                    }
+                }
+            }
+            prev_sys = Some((cur, sys.to_string()));
+        }
+        // each tool, keyed by name — size fingerprint (`schema_tokens`).
+        for t in &a.tools {
+            let key = format!("tool:{}", t.name);
+            if let Some(prev) = prev_tool.get(&key) {
+                if let Some(d) = drift_delta(*prev, t.schema_tokens) {
+                    first_drift.entry(key.clone()).or_insert(s.index);
+                    deltas.push(d);
+                }
+            }
+            prev_tool.insert(key, t.schema_tokens);
+        }
+    }
+
+    if first_drift.is_empty() {
+        return None;
+    }
+    // Deterministic "component@step" list (BTreeMap ⇒ sorted by key).
+    let where_ = first_drift
+        .iter()
+        .map(|(name, ix)| format!("{name}@step {ix}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(Indictment {
+        code: "component-drift".to_string(),
+        detail: format!(
+            "{} same-named component(s) mutated mid-session: {where_} (~{} tok changed; a renamed tool reads as remove+add, not drift)",
+            first_drift.len(),
+            sat_sum(deltas.iter().copied())
+        ),
+        wasted_tokens: sat_sum(deltas.into_iter()),
     })
 }
 
@@ -1065,7 +1165,23 @@ mod tests {
     // rename reads as remove+add (NOT a drift event — drift requires the
     // SAME name) — asserted here, stated in `detail`/`--deep`.
     #[test]
-    #[ignore = "C2/D-011 TDD red: un-ignored in the impl commit (proven failing on HEAD)"]
+    fn component_drift_decision_exact_boundaries() {
+        // The pure per-appearance decision, pinned at its exact boundary
+        // so the approximate tokenizer cannot reach it through compose()
+        // (the D-010 technique). prev == cur ⇒ no event; any inequality
+        // ⇒ the saturating absolute magnitude (always >= 1).
+        assert_eq!(drift_delta(10, 10), None); // identical ⇒ stable
+        assert_eq!(drift_delta(10, 11), Some(1)); // grew by 1 (kills ==→!=)
+        assert_eq!(drift_delta(11, 10), Some(1)); // shrank by 1 (abs both ways)
+        assert_eq!(drift_delta(0, 0), None); // empty == empty ⇒ stable
+        assert_eq!(drift_delta(0, 1), Some(1)); // appeared/grew from 0
+        assert_eq!(drift_delta(5, 9), Some(4)); // exact magnitude, not a flag
+        // saturating: no panic / wrap at the extreme either direction.
+        assert_eq!(drift_delta(usize::MAX, 0), Some(usize::MAX));
+        assert_eq!(drift_delta(0, usize::MAX), Some(usize::MAX));
+    }
+
+    #[test]
     fn component_drift_fires_only_when_a_same_named_component_mutates() {
         // FIRES — system mutates between step 0 and step 1 (same key
         // "system", different bytes). Tools stable.
