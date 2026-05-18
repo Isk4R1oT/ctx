@@ -53,7 +53,7 @@ fn env_or(keys: &[&str]) -> String {
 /// [`crate::Error::Config`] if the command is empty,
 /// [`crate::Error::Bind`] if the loopback listener cannot bind, or
 /// [`crate::Error::Spawn`] if the child cannot be launched.
-pub async fn execute(command: &[String]) -> crate::Result<RunOutcome> {
+pub async fn execute(command: &[String], upstream: Option<&str>) -> crate::Result<RunOutcome> {
     let Some((program, args)) = command.split_first() else {
         return Err(crate::Error::Config(
             "nothing to run — usage: ctx run -- <command>".to_string(),
@@ -64,14 +64,18 @@ pub async fn execute(command: &[String]) -> crate::Result<RunOutcome> {
         &env_or(&["CTX_UPSTREAM_ANTHROPIC", "ANTHROPIC_BASE_URL"]),
         "https://api.anthropic.com",
     );
-    // Default carries `/v1`: ctx now injects the proxy ROOT (no
-    // synthetic `/v1`), so the upstream base must hold the provider's
-    // real path itself (D-017).
-    let openai_raw = env_or(&["CTX_UPSTREAM_OPENAI", "OPENAI_BASE_URL", "OPENAI_API_BASE"]);
-    // Explicit user upstream ⇒ authoritative; absent ⇒ the per-request
-    // key-prefix registry may infer it (P2/D-017).
-    let openai_explicit = !openai_raw.is_empty();
-    let openai_base = base_of(&openai_raw, "https://api.openai.com/v1");
+    // Upstream precedence (D-017): `--to`/`--provider` flag (passed as
+    // `upstream`) → `CTX_UPSTREAM_*`/`*_BASE_URL` env → per-request
+    // key-prefix registry inference (P2) → default. The default
+    // carries `/v1` because ctx injects the proxy ROOT (no synthetic
+    // `/v1`); the upstream base must hold the provider's real path.
+    let (openai_base, openai_explicit) = if let Some(flag) = upstream {
+        (base_of(flag, "https://api.openai.com/v1"), true)
+    } else {
+        let raw = env_or(&["CTX_UPSTREAM_OPENAI", "OPENAI_BASE_URL", "OPENAI_API_BASE"]);
+        let explicit = !raw.is_empty();
+        (base_of(&raw, "https://api.openai.com/v1"), explicit)
+    };
 
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -164,7 +168,7 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        let err = rt.block_on(execute(&[])).unwrap_err();
+        let err = rt.block_on(execute(&[], None)).unwrap_err();
         assert!(matches!(err, crate::Error::Config(_)));
     }
 

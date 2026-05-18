@@ -58,6 +58,16 @@ pub enum Cmd {
         #[arg(long, value_name = "FILE")]
         save: Option<PathBuf>,
 
+        /// Explicit upstream base URL (full, path preserved). The
+        /// most-explicit source — beats env and key inference (D-017).
+        #[arg(long, value_name = "URL", conflicts_with = "provider")]
+        to: Option<String>,
+
+        /// Known-provider shortcut: openai | anthropic | openrouter |
+        /// groq | google (resolves to that provider's base, D-017).
+        #[arg(long, value_name = "NAME")]
+        provider: Option<String>,
+
         /// Everything after `--` is the child command, verbatim.
         #[arg(last = true, required = true, value_name = "CMD")]
         command: Vec<String>,
@@ -135,5 +145,34 @@ mod tests {
     fn bare_invocation_has_no_subcommand() {
         let c = Cli::try_parse_from(["ctx"]).unwrap();
         assert!(c.cmd.is_none());
+    }
+
+    #[test]
+    fn run_parses_to_and_provider_flags() {
+        let c = Cli::try_parse_from(["ctx", "run", "--to", "https://gw/v1", "--", "sh"]).unwrap();
+        match c.cmd {
+            Some(Cmd::Run { to, provider, .. }) => {
+                assert_eq!(to.as_deref(), Some("https://gw/v1"));
+                assert_eq!(provider, None);
+            }
+            _ => panic!("expected run"),
+        }
+        let c = Cli::try_parse_from(["ctx", "run", "--provider", "openrouter", "--", "sh"]).unwrap();
+        match c.cmd {
+            Some(Cmd::Run { to, provider, .. }) => {
+                assert_eq!(provider.as_deref(), Some("openrouter"));
+                assert_eq!(to, None);
+            }
+            _ => panic!("expected run"),
+        }
+    }
+
+    #[test]
+    fn run_to_and_provider_are_mutually_exclusive() {
+        // One explicit source only — clap must reject both together.
+        let e = Cli::try_parse_from([
+            "ctx", "run", "--to", "https://x", "--provider", "openai", "--", "sh",
+        ]);
+        assert!(e.is_err(), "--to and --provider must conflict");
     }
 }

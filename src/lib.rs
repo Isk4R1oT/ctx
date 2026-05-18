@@ -59,8 +59,30 @@ pub async fn run_app(cli: Cli) -> Result<i32> {
             renderer.banner(&mut out)?;
             Ok(0)
         }
-        Some(Cmd::Run { save, command }) => {
-            let outcome = run::execute(&command).await?;
+        Some(Cmd::Run {
+            save,
+            to,
+            provider,
+            command,
+        }) => {
+            // Upstream from the flags (D-017): `--to` verbatim, or
+            // `--provider` via the registry; unknown provider ⇒ a
+            // clear error (never a silent/guessed upstream). `--to`
+            // and `--provider` are clap-conflicting.
+            let upstream: Option<String> = match (to, provider) {
+                (Some(u), _) => Some(u),
+                (None, Some(p)) => Some(
+                    crate::registry::base_for_provider(&p)
+                        .ok_or_else(|| {
+                            Error::Config(format!(
+                                "unknown --provider '{p}'; known: openai, anthropic, openrouter, groq, google — or use --to <url>"
+                            ))
+                        })?
+                        .to_string(),
+                ),
+                (None, None) => None,
+            };
+            let outcome = run::execute(&command, upstream.as_deref()).await?;
             let sink = save.map_or(Sink::Ephemeral, Sink::Sqlite);
             store::persist(&outcome.timeline, &sink)?;
             // F1 is the headline (D-005). --json keeps `steps` top-level.

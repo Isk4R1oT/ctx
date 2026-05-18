@@ -76,6 +76,29 @@ pub fn resolve_openai_base<'a>(
     }
 }
 
+/// P3/D-017 — `--provider <name>` shortcuts. Same bases as the
+/// key-prefix table; only providers with a single well-known base
+/// (Azure is resource-specific ⇒ use `--to <url>` instead — by
+/// design, not an omission).
+pub const PROVIDERS: &[(&str, &str)] = &[
+    ("openai", "https://api.openai.com/v1"),
+    ("anthropic", "https://api.anthropic.com"),
+    ("openrouter", "https://openrouter.ai/api/v1"),
+    ("groq", "https://api.groq.com/openai/v1"),
+    ("google", "https://generativelanguage.googleapis.com/v1beta/openai"),
+];
+
+/// Resolve a `--provider` NAME (case-insensitive) to its upstream
+/// base, else `None` (caller must surface a clear error — never a
+/// silent/guessed upstream).
+#[must_use]
+pub fn base_for_provider(name: &str) -> Option<&'static str> {
+    PROVIDERS
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map(|(_, base)| *base)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +198,23 @@ mod tests {
             resolve_openai_base(false, "https://api.openai.com/v1", none),
             "https://api.openai.com/v1"
         );
+    }
+
+    #[test]
+    fn base_for_provider_exact_and_case_insensitive() {
+        assert_eq!(base_for_provider("openai"), Some("https://api.openai.com/v1"));
+        assert_eq!(base_for_provider("anthropic"), Some("https://api.anthropic.com"));
+        assert_eq!(
+            base_for_provider("OpenRouter"),
+            Some("https://openrouter.ai/api/v1")
+        );
+        assert_eq!(base_for_provider("groq"), Some("https://api.groq.com/openai/v1"));
+        assert_eq!(
+            base_for_provider("GOOGLE"),
+            Some("https://generativelanguage.googleapis.com/v1beta/openai")
+        );
+        // unknown ⇒ None (caller errors clearly; never a guess)
+        assert_eq!(base_for_provider("azure"), None);
+        assert_eq!(base_for_provider(""), None);
     }
 }

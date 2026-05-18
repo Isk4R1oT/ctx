@@ -577,7 +577,6 @@ async fn explicit_upstream_beats_the_key_registry() {
 // `#[ignore]` keeps the gate green at the red commit; un-ignored at
 // the P3 impl commit.
 #[tokio::test]
-#[ignore = "P3/D-017 red: --to flag not yet added; un-ignored at the P3 impl commit"]
 async fn to_flag_is_the_explicit_upstream() {
     let up = MockServer::start().await;
     Mock::given(method("POST"))
