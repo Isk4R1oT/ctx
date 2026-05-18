@@ -1009,3 +1009,24 @@ mechanism or any self-report.
   UX win on real traffic).
 - `cargo deny`/`machete` ok (no new deps). `/rust-review`+`/rust-harden`
   substituted in-thread, NOT subagent-delegated (D-008). No false green.
+
+---
+
+## P2 / D-017 — provider registry + auto-resolve (rust-cc, real e2e)
+
+- Red-first: 3 `registry` contract tests vs `None`-stubs, `#[ignore]`'d,
+  PROVEN failing (`78890b4`); impl + un-ignore (`37de21b`).
+- Compiler-truth loop: `just check` clippy `-D warnings` 0; `just test`
+  150/150 + doctests; explicit-`CTX_UPSTREAM` integration tests
+  byte-identical ⇒ zero regression; P1 subpath test green.
+- cargo-mutants 2 passes, REAL baselines: pass 1 `ok 20s+7s` 12 →
+  1 MISSED (`delete !` in `execute`); NOT accepted → pinned by
+  `explicit_upstream_beats_the_key_registry` (wiremock `.expect(1)`;
+  the mutant routes to real openrouter and misses it) (`9e74c91`).
+  Pass 2 `ok 22s+8s` 12 → 11 caught, 1 unviable, **0 missed**.
+- REAL e2e: all upstream env UNSET + only the `sk-or-` key ⇒
+  `ctx run -- script` ⇒ live OpenRouter **HTTP 200** + F1 decomposes.
+  Zero upstream config.
+- `cargo deny`/`machete` ok (no new deps — registry is std-only).
+  `/rust-review`+`/rust-harden` substituted in-thread (D-008). No
+  false green.

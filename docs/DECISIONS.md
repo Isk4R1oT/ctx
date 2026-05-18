@@ -1299,3 +1299,39 @@ client>` ⇒ live OpenRouter HTTP 200 + F1 decomposes, ZERO
 proven on real traffic. Commits `8c315fa` (red) `5897ec3` (fix)
 `7b4bea8` (harden). `/rust-review`+`/rust-harden` substituted in-thread
 (D-008 incident), not subagent-delegated. No false green.
+
+### D-017 P2 — provider registry + per-request auto-resolve DONE
+
+New `src/registry.rs` (pure, offline, no network — §8 seam): tiny
+key-prefix table (`sk-ant-`/`sk-or-`/`gsk_`/`AIza`/generic `sk-`,
+ordered most-specific-first ⇒ longest-prefix), `bearer_token`
+(case-insensitive name+scheme, trimmed, empty⇒None), `resolve_openai_
+base` (EXPLICIT upstream always wins → infer from bearer-key prefix →
+default; unknown ⇒ default, never a guess). Only DISTINCTIVE prefixes
+mapped (a provider without a stable public prefix is deliberately
+absent). Wired into `proxy::forward` (OpenAiCompat lane);
+`ProxyState.openai_explicit`; `run::execute` computes explicit =
+env-given. Anthropic lane unchanged (P1).
+
+**Gates (real, non-vacuous).** Red-first: 3 contract tests
+`#[ignore]`'d against `None`-stubs, PROVEN failing (`78890b4`); impl +
+un-ignore (`37de21b`). `just check` clippy `-D warnings` 0; `just
+test` **150/150, 0 skipped** + doctests; the explicit-`CTX_UPSTREAM`
+integration tests UNCHANGED ⇒ zero regression; P1 subpath test green.
+cargo-mutants `--in-diff` (registry+proxy+run): pass 1 REAL baseline
+`ok 20s build + 7s test`, 12 mutants → **1 MISSED** (`delete !` in
+`execute`: `openai_explicit = !is_empty` inverted; no test exercised
+env-SET + a registry-matching key through `execute()`). NOT accepted:
+added `explicit_upstream_beats_the_key_registry` (explicit
+`CTX_UPSTREAM` + a `sk-or-` bearer ⇒ MUST hit the explicit wiremock,
+`.expect(1)` verified; the mutant would route to real openrouter.ai
+and miss it) (`9e74c91`). Pass 2 REAL baseline `ok 22s build + 8s
+test`, 12 mutants → **11 caught, 1 unviable, 0 missed**. REAL e2e
+(green ≠ works): `CTX_UPSTREAM_OPENAI`/`OPENAI_BASE_URL`/`OPENAI_API_
+BASE` ALL unset + only the `sk-or-` key the script already uses ⇒
+`ctx run -- script` ⇒ live OpenRouter HTTP 200 + F1 decomposes
+(ZERO upstream config — the P2 win). `/rust-review`+`/rust-harden`
+substituted in-thread (D-008 incident). No false green.
+
+**UX arc so far:** 3-part hack → P1 one env (`OPENAI_BASE_URL=…`) →
+P2 zero upstream config (the key auto-routes for known providers).
