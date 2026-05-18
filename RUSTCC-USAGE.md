@@ -795,3 +795,124 @@ from the agent self-report:
 Conclusion: C4 is correct and honestly green ON MAIN despite the
 isolation breach — accepted. `.gitignore` now excludes
 `/.claude/worktrees/` (added by C4; legitimate hygiene).
+
+---
+
+## C5 / D-015 — `non-text-payload` (multimodal/file byte attribution; + an ADDITIVE `Assembled` field)
+
+- **Isolation HELD.** Unlike the C3/C4 breaches, C5 ran in the
+  isolated worktree branch `worktree-agent-af3637b69b7ece49a` off
+  `a973f0d` throughout — verified by `git rev-parse --abbrev-ref HEAD`
+  before every commit (the Bash tool's default cwd IS the worktree; an
+  explicit `cd /Users/igor/Projects/caliper/ctx` jumps to `main`, so
+  all cargo/git ran via the persisted worktree cwd / absolute worktree
+  paths). Reported plainly per the orchestrator's no-trust contract.
+- **TDD red-first.** The `compose.rs` behavioral test
+  `non_text_payload_fires_and_is_a_distinct_component_not_silent_history`
+  written FIRST, proven **RED on worktree HEAD `a973f0d`**: force-run
+  via `cargo nextest run --run-ignored all -E 'test(...)'` → `1
+  failed`, panic `src/compose.rs:2299` "inline image bytes MUST be a
+  distinct `non-text-payload` component, not silently in history:
+  [system, tool-schemas, history]" (empirically proves the bytes were
+  mis-attributed into `history` before C5 — the skeptic check). Full
+  suite stayed **138 passed, 1 skipped** (the `#[ignore]`-with-reason
+  C5 test — commit-gate + 138 baseline green). `#[ignore]` at the test
+  commit `1e80f2c`, un-ignored at the impl commit `b25dd5d` (the
+  D-011/D-014 runtime-panic pattern; the `non_text_weight` boundary
+  table moved to the impl commit — it cannot be `#[ignore]`d).
+  Anomaly recorded honestly: the FIRST Edit of the test silently did
+  not persist (file unchanged, `git status` clean) — detected by
+  `wc -l`/`rg` (NOT trusted from the tool's "success"), re-applied via
+  the absolute worktree path, verified on disk before proceeding.
+- **ADDITIVE `Assembled` change (mirrors C4 exactly).** `adapter.rs`
+  gains `Assembled.non_text: Vec<NonTextPart>` appended **after**
+  `sampling` + `pub const NON_TEXT_KINDS` + a pure `non_text_of(&[Value])`
+  walk (per-message `content` array; a block whose `type` ∈
+  `NON_TEXT_KINDS` recorded with its EXACT wire byte length
+  `Value::to_string().len()`; base64 NOT decoded — no new dep).
+  `cargo clippy --all-targets` after the field add = 0 errors ⇒
+  compiler-verified `Assembled` is constructed in ONLY the two
+  `adapter::parse` arms (a missed site would not compile). `flatten_content`
+  UNCHANGED ⇒ zero `history`/F0/F2/F3 regression (C5 attributes the
+  bytes in parallel, does not move them).
+- **Compiler-truth loop.** PostToolUse `rustcc gate` ran `cargo
+  check`/clippy after each `.rs` edit. The digest named ONE root-cause
+  class: clippy `doc_markdown` — "doc list item without indentation"
+  ×4 (a `/`-led phrase clippy parsed as a list item) + "item in
+  documentation is missing backticks" (`OTEL`/`GenAI`). Fixed
+  root-cause-first (rephrased the `/`-phrase, backticked the acronyms),
+  re-ran `just check` (clippy `-D warnings` incl. pedantic) = 0/0. No
+  hand-rolled cargo; commit-gate never bypassed (no `--no-verify`/
+  `RUSTCC_GATES=off`).
+- **`just test` after impl/harden: 142 nextest + doctests, 0 skipped**
+  — 138 baseline **+4** (the un-ignored behavioral test + the
+  `non_text_weight` exact-boundary table + the `NON_TEXT_KINDS`
+  `black_box` pin + the `kind_tally` exact table). Purely additive,
+  zero regression: all F0/F1/F2/F3 + decode + C1/C2/C3/C4/C6 green.
+  The ONLY existing-snapshot change is the additive `"non_text": []`
+  appended after `"sampling": []` on both steps of the text-only
+  `fixture` in `timeline_json_contract.snap`; `cargo insta` not
+  installed → the `.snap.new` was `diff`ed (EXACTLY two
+  `+ "non_text": []` lines, every other byte identical, `steps`
+  top-level) and applied manually — the C3/C4 manual-apply precedent;
+  D-005 intact. `grep -l non-text-payload tests/snapshots` is EMPTY
+  (C5 correctly SILENT on every existing fixture).
+- **`cargo deny`/`machete` ok — NO new deps** (`serde_json::Value` +
+  std `BTreeMap`/iterators only; base64 NOT decoded — the spec's
+  raw-wire-byte-length option, no base64 crate).
+- **cargo-mutants `--in-diff` on the C5 diff (`a973f0d..HEAD`, src
+  only):**
+  - **Pre-fix probe** — `Unmutated baseline ok 21s build + 7s test`,
+    21 mutants → **1 MISSED**: `replace += with *= in
+    indict_non_text_payload` (the hand per-kind `*entry().or_insert(0)
+    += 1`; `1*1==1==1+1` for ≤1 block/kind). **NOT accepted.**
+  - Eliminated **BY CONSTRUCTION** (the proven D-010/D-012 technique):
+    the hand `+=` accumulator replaced by a pure `kind_tally` helper
+    counting via `Iterator::filter().count()` — no mutable arithmetic
+    operator remains — over `NON_TEXT_KINDS` in fixed declaration
+    order; + a discriminating `kind_tally` unit table (count==2 so
+    `*=` ≠ `+=`, fixed-order assertion) + the behavioral test
+    extended to BOTH wire shapes with TWO same-kind blocks
+    ("2 image" / "2 block(s)" pinned through `compose()`).
+  - **Pass 1 (post-fix)** — `Unmutated baseline ok 19s build + 6s
+    test`, 25 mutants → **20 caught, 5 unviable, 0 MISSED**.
+  - **Pass 2 (independent)** — `Unmutated baseline ok 19s build + 7s
+    test`, 25 mutants → **20 caught, 5 unviable, 0 MISSED** (stable).
+  - The 5 unviable are the non-compiling `Default::default()` return
+    arms (`NonTextPart`/`Assembled`/`Composition`/`Indictment` have no
+    `Default`) — verified via `mutants.out/unviable.txt`,
+    `missed.txt` EMPTY both passes (genuinely unviable, not
+    equivalent-and-missed).
+- **REAL e2e (green ≠ works).** `cargo build` green; a real
+  python-httpx client through `./target/debug/ctx run --save` (DUMMY
+  `Authorization: Bearer test`; natural `/v1/chat/completions`;
+  upstream 404 — request captured BEFORE forward; $0; no real key).
+  - MODE=image (OpenAI body, real 1×1 PNG base64 `image_url` data
+    URI) ⇒ **FIRES**: `component non-text-payload` (distinct row, NOT
+    in history) + `waste non-text-payload wasted_tokens=0
+    non-text-payload: 1 block(s) (1 image_url), ~161 bytes (53% of
+    the assembled body) — exact wire bytes, base64 not decoded, no
+    media token estimate (omitted to stay strictly pure)`;
+    round-trips post-hoc via `ctx open` AND `ctx --json open`
+    (`steps[0].assembled.non_text ==
+    [{"kind":"image_url","bytes":161}]`, top-level keys exactly
+    `['composition','steps']`, `wasted_tokens:0` integer).
+  - MODE=text (text-only) ⇒ correctly **SILENT** end-to-end: no
+    component, no indictment, `non_text: []` post-hoc in
+    `ctx --json open` (present AND absent, live AND post-hoc).
+- **Pure measurement only.** Exact block count + exact byte sum +
+  integer percent of the EXACT body bytes; `wasted_tokens` hard-0
+  (a byte-ATTRIBUTION fact, not a token-waste class); NO media token
+  estimate (OMITTED entirely — the strictly-pure option, harder than
+  the ±N% text tokenizer); the detail states the regime verbatim.
+  evalint stays KILLED; graph stays REFUTED; no kill-zone, no judge,
+  no prediction, no hosted anything.
+- **`/rust-review`/`/rust-harden` NOT invocable in-thread** (not in
+  this environment's skill registry) → substituted by an in-thread
+  tool-grounded self-review (`rg`/`cargo` verified: no unsafe / no
+  async / no unwrap / no expect / no clone-to-silence / no `&&`|`||`
+  in the C5 logic / `wasted_tokens` hard-0 / detail a reported FACT /
+  SILENT on every existing snapshot) + the 2-pass real cargo-mutants
+  evidence above; deliberately NOT subagent-delegated (the D-008
+  review-subagent integrity incident). Recorded as a substitution,
+  not an independent SHIP. No false green.

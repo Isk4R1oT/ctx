@@ -11,8 +11,12 @@
 > `component-drift` (D-011), C3 context-window headroom & slope
 > (D-012), C6 `request-replayed` (D-013), C4 `param-drift` (D-014 —
 > the additive `Assembled.sampling` field + the determinism-surface
-> fact; `agentlock`'s non-determinism *attribution* stays EXCLUDED).
-> C5 remains a ranked candidate. **C7 deferred by decision (2026-05-18):** ranked LOW +
+> fact; `agentlock`'s non-determinism *attribution* stays EXCLUDED),
+> C5 `non-text-payload` (D-015 — the additive `Assembled.non_text`
+> field + a DISTINCT component/indictment by EXACT wire byte weight +
+> block counts; base64 NOT decoded, the per-image token estimate
+> OMITTED ENTIRELY to stay strictly pure). C1/C2/C3/C4/C5/C6 are now
+> all implemented. **C7 deferred by decision (2026-05-18):** ranked LOW +
 > the honest `store.rs`-does-not-persist-request-headers substrate
 > blocker (shared F0 surface with agentlock/guard) — not built
 > rather than silently half-shipped.
@@ -218,7 +222,7 @@ request-only or needs response/SSE · feasibility · priority.
   non-determinism" (that claim belongs to `agentlock`'s scoped framing, and
   even there is "attribute", never "reproduce").
 
-### C5 — Multimodal / non-text payload weight attribution  ·  **PRIORITY: MED**
+### C5 — Multimodal / non-text payload weight attribution  ·  **PRIORITY: MED · IMPLEMENTED (D-015, 2026-05-18)**
 
 - **Definition.** Detect image/audio/file blocks in the wire body (base64 data
   URIs, `image`/`input_audio` content parts) and attribute their **byte

@@ -972,3 +972,197 @@ no-unwrap / no-clone-to-silence / no `&&`|`||` in the namespace gate /
 SILENT on every existing snapshot) — deliberately NOT subagent-
 delegated (the D-008 review-subagent integrity incident). Recorded as a
 substitution, not an independent SHIP. No false green.
+
+## D-015 — C5: non-text-payload, a new pure-measurement F1 signal (2026-05-18)
+
+### Status: LOCKED. Additive (the PROJECT.md §8 "versioned indictment ruleset" seam + an ADDITIVE `Assembled` field, mirroring C4/D-014). Does not relitigate D-001..D-014; evalint stays KILLED; graph stays REFUTED.
+
+**Why.** Multimodal / file content (base64 data URIs, `image`/
+`image_url`/`input_audio`/`file`/`document` blocks — both wire shapes)
+is invisible to the SDK→DB→dashboard field: OTEL GenAI content capture
+is OFF by default, and even when on, large media is truncated/dropped
+by the SDK exporter — the *opposite* of `ctx`'s verbatim wire capture.
+Before C5 those bytes silently inflated `history` (the adapter's
+`flatten_content` `to_string()`s an image block straight into the
+message text ⇒ counted as garbage "history" tokens). C5 attributes the
+EXACT byte weight + block counts as a DISTINCT component + indictment so
+the engineer SEES that e.g. 53% of the assembled body is inline image
+data. Spec'd and ranked MED by the independent research artifact
+`docs/CONTEXT-SIGNALS-RESEARCH.md` §(c) C5, whose definition / the
+"pure-measurement? YES for bytes/block-counts; image token-estimate
+must be labeled estimate-only OR omitted to stay strictly pure" rule /
+§(d) exclusions / §(e) `[INFER]` discipline this entry obeys exactly.
+
+**Skeptic check (done, NOT vacuous).** "Are these bytes already counted
+by `history`, making C5 mere relabelling?" The bytes ARE in the body,
+but they are mis-attributed (silently inflate `history` as garbage
+non-text tokens, the wrong component) and the *block count + exact byte
+weight + % of body* are nowhere surfaced. The TDD RED proves it
+empirically: on HEAD `a973f0d` an image body's components were exactly
+`[system, tool-schemas, history]` — the image bytes hidden in history,
+no distinct attribution. C5's novelty is the **distinct, exact
+byte/block attribution** the SDK→DB→dashboard field structurally cannot
+do (truncates media). Real, not relabelling — kept.
+
+**The ADDITIVE `Assembled` change (mirrors C4/D-014 exactly).**
+`adapter.rs` gains `Assembled.non_text: Vec<NonTextPart>` — a **new
+field appended after `sampling`** (`NonTextPart { kind: String, bytes:
+usize }`); no existing field removed/renamed/reordered; serialization
+backward-compatible exactly like C4's `sampling`. `pub const
+NON_TEXT_KINDS` (the tracked content-block `type`s, both wire shapes:
+Anthropic `image`/`document`, OpenAI `image_url`/`input_audio`/`file`/
+`audio`) + a pure `non_text_of(messages)` walk: per message `content`
+array, a block whose `type` ∈ `NON_TEXT_KINDS` is recorded with its
+**EXACT wire byte length** (`Value::to_string().len()`). base64 is NOT
+decoded — the wire bytes ARE the cost (no base64 crate, no new dep, the
+spec's "raw byte length of the data-URI payload" option). `Assembled`
+is constructed in only the two `adapter::parse` arms (compiler-verified
+— a missed site would not compile); the change is contained.
+`flatten_content` is UNCHANGED ⇒ ZERO `history`/F0/F2/F3 regression
+(C5 is purely additive — it does not move the bytes, it ATTRIBUTES
+them in parallel).
+
+**Rule (pure measurement).** `compose` gains a DISTINCT
+`non-text-payload` **component** (present only when the focus step
+carried ≥1 non-text block; `tokens` is a hard `0` ON PURPOSE — the
+per-image token figure is the weakest tokenizer regime and is **OMITTED
+ENTIRELY** to stay strictly pure, the spec's stricter option, so a
+`0`-token additive row never perturbs the `Σ components == total`
+invariant) + `indict_non_text_payload`: the focus step (the same last-
+structurally-parsed focus as the F1 headline — one representative step,
+not a cross-step sum), its non-text blocks' EXACT byte sum, the block
+count, the per-kind tally (`kind_tally` over `NON_TEXT_KINDS` in fixed
+declaration order), and the integer percent of the focus step's EXACT
+request-body byte length (div-by-zero-safe via the shared `pct()`).
+Indictment string: `non-text-payload: N block(s) (<tally>), ~B bytes
+(P% of the assembled body) — exact wire bytes, base64 not decoded, no
+media token estimate (omitted to stay strictly pure)`. The pure
+decision is isolated in `non_text_weight(part_bytes, body_bytes)` (an
+exact-boundary unit table — no tokenizer/heuristic can reach it through
+`compose()`, the proven D-010/D-011/D-014 by-construction technique).
+Strictly an EXACT block count + an EXACT byte sum + an integer percent
+of the EXACT body bytes — NO judge, NO score, NO prediction, NEVER
+"too big / will be ignored" (evalint KILLED; the §(d) excluded class).
+
+**Honest limits (recorded, not buried).**
+- **No media token estimate at all.** The per-image/-audio token figure
+  is provider-formula-dependent (the weakest tokenizer regime, harder
+  than the ±N% text tokenizer); per the spec it is OMITTED ENTIRELY
+  (the stricter of the two allowed options) — the headline is
+  byte-based only. The `bytes` and the block `count` are EXACT; the
+  only approximation anywhere is the unrelated `total_tokens` of the
+  rest of the prompt (the existing ±N% tokenizer, labelled).
+- **base64 is NOT decoded.** `bytes` is the EXACT wire byte length of
+  the content block's JSON (`Value::to_string().len()`), which is the
+  real weight those bytes add to the request body — NOT the decoded
+  image size. This is the spec's explicit "raw byte length of the
+  data-URI payload" measure (no base64 crate, no new dep). Stated
+  verbatim in the indictment text.
+- **Present-vs-absent semantics.** A text-only body ⇒ `non_text` empty
+  ⇒ NO `non-text-payload` component, NO indictment (correctly SILENT —
+  the C2/C4 silent-on-text discipline; proven by the control fixture
+  AND the real text-only e2e, present AND absent).
+- **One representative focus step**, not a cross-step sum (kept minimal
+  & pure, the C2/C4 first-event discipline; a per-step media history is
+  a possible future seam, not built). Request-only; round-trips
+  post-hoc (`ctx open` re-parses the saved bytes via the adapter, so
+  `non_text` is reconstructed identically — verified).
+- `wasted_tokens = 0` always: a non-text payload is a byte-ATTRIBUTION
+  fact, not a token-waste class (the C4 hard-`0` discipline, the
+  `Indictment` "not a partition" rule) — never a fabricated cost.
+
+**`--json` additive (D-005 contract intact, verified).** The new data
+ships as `steps[].assembled.non_text` (additive on the F0 `Assembled`)
+and as the `non-text-payload` component + indictment (additive on the
+F1 side). `report_json`'s `RunReport { #[serde(flatten)] timeline,
+composition }` is unchanged — `--json open` top-level keys stay exactly
+`{composition, steps}`, `steps` top-level, integer/no-float (the
+`wasted_tokens:0` integer, the `bytes` integer, no new float). The ONLY
+existing-snapshot change is the additive `"non_text": []` appended
+immediately after `"sampling": []` on both steps of the text-only
+`fixture` in `timeline_json_contract.snap` (the `Assembled` serializer)
+— regenerated, the diff verified to be EXACTLY two `+ "non_text": []`
+lines (every other byte identical; `steps` top-level), mirroring C4's
+manually-applied additive `"sampling": []`. Every other F0/F1/F2/F3/
+C1/C2/C3/C4/C6 snapshot is byte-identical (C5 is correctly SILENT on
+every existing fixture — `grep -l non-text-payload tests/snapshots` is
+empty).
+
+**Gates (real, non-vacuous).** TDD red-first: the `compose.rs`
+behavioral test was written FIRST and **proven RED on worktree HEAD
+`a973f0d`** (panic: "inline image bytes MUST be a distinct
+`non-text-payload` component, not silently in history: [system,
+tool-schemas, history]") while the full **138** suite stayed green
+(138 passed, 1 skipped = the C5 test) — recorded in the ROOT
+RUSTCC-USAGE.md, `#[ignore]`-with-reason at the test commit `1e80f2c`
+(commit-gate/suite green), un-ignored in the impl commit `b25dd5d`
+(the D-011/D-014 runtime-panic red-first pattern; the `non_text_weight`
+boundary table moved to the impl commit since it cannot be
+`#[ignore]`d). Compiler-truth loop (`just check`, clippy `-D warnings`
+incl. pedantic): the PostToolUse `rustcc gate` digest named ONE
+root-cause class — `doc_markdown` ("doc list item without
+indentation" ×4 from a `/`-led phrase clippy mis-read as a list +
+"item in documentation is missing backticks" for `OTEL`/`GenAI`);
+fixed root-cause-first (rephrased, backticked), re-checked green.
+`just test` = **142 nextest** (138 baseline +4: the un-ignored
+behavioral test + the `non_text_weight` exact-boundary table + the
+`NON_TEXT_KINDS` `black_box` pin + the `kind_tally` exact table) +
+doctests, 0 skipped — purely additive, zero regression. `cargo deny`
+advisories/bans/licenses/sources ok; `cargo machete` no unused deps
+(**no new deps** — `serde_json::Value` + std `BTreeMap`/iterators
+only; base64 NOT decoded). cargo-mutants `--in-diff` on the C5 diff
+(`a973f0d..HEAD`, src only):
+- **Pre-fix probe** — `Unmutated baseline ok 21s build + 7s test`,
+  21 mutants → **1 MISSED**: `replace += with *= in
+  indict_non_text_payload` (the hand per-kind `*entry().or_insert(0)
+  += 1`; `1*1 == 1 == 1+1` for a single block, all fixtures had ≤1
+  block/kind). **NOT accepted.** Eliminated **BY CONSTRUCTION** (the
+  proven D-010/D-012 technique): the hand `+=` accumulator was
+  replaced by a pure `kind_tally` helper that counts via
+  `Iterator::filter().count()` — no mutable arithmetic operator
+  remains for a mutant to flip — over `NON_TEXT_KINDS` in fixed
+  declaration order; plus a discriminating `kind_tally` unit table
+  (count==2 cases so `*=` ≠ `+=`, fixed-order assertion) AND the
+  behavioral test extended to BOTH wire shapes with TWO same-kind
+  blocks ("2 image" / "2 block(s)" pinned through `compose()`).
+- **Pass 1 (post-fix)** — `Unmutated baseline ok 19s build + 6s test`,
+  25 mutants → **20 caught, 5 unviable, 0 MISSED**.
+- **Pass 2 (independent)** — `Unmutated baseline ok 19s build + 7s
+  test`, 25 mutants → **20 caught, 5 unviable, 0 MISSED** (stable).
+- The 5 unviable are the non-compiling `Default::default()` return
+  arms (`NonTextPart`/`Assembled`/`Composition`/`Indictment` have no
+  `Default` — genuinely unviable, not equivalent-and-missed; verified
+  via `mutants.out/unviable.txt`, `missed.txt` empty both passes).
+Real e2e (green ≠ works): `cargo build` green; a real python-httpx
+client through `./target/debug/ctx run --save` (DUMMY `Authorization:
+Bearer test`; natural `/v1/chat/completions`; upstream 404 — request
+captured BEFORE forward; $0; no real key).
+- MODE=image (OpenAI body with a real 1×1 PNG base64 `image_url`
+  data URI) ⇒ **FIRES**: a distinct `component non-text-payload` row
+  (NOT in history) + `waste non-text-payload wasted_tokens=0
+  non-text-payload: 1 block(s) (1 image_url), ~161 bytes (53% of the
+  assembled body) — exact wire bytes, base64 not decoded, no media
+  token estimate (omitted to stay strictly pure)`; round-trips
+  post-hoc through `ctx open` AND `ctx --json open`
+  (`steps[0].assembled.non_text == [{"kind":"image_url",
+  "bytes":161}]`, top-level keys exactly `{composition, steps}`,
+  `wasted_tokens:0` integer).
+- MODE=text (text-only content) ⇒ correctly **SILENT** end-to-end:
+  no `non-text-payload` component, no indictment, `non_text: []`
+  post-hoc in `ctx --json open` (present AND absent both verified,
+  live AND post-hoc).
+**Pure measurement only.** Exact block count + exact byte sum +
+integer percent of the EXACT body bytes; `wasted_tokens` hard-0; NO
+media token estimate (omitted, the strictly-pure option); the detail
+states the regime verbatim ("exact wire bytes, base64 not decoded, no
+media token estimate (omitted to stay strictly pure)"). evalint stays
+KILLED — no judge/score/prediction, no kill-zone, no graph, no hosted
+anything. `/rust-review` + `/rust-harden` NOT invocable in-thread (not
+in this environment's skill registry) → substituted by an in-thread
+tool-grounded self-review (`rg`/`cargo` verified: no unsafe / no async
+/ no unwrap / no expect / no clone-to-silence / no `&&`|`||` in the C5
+logic / `wasted_tokens` hard-0 / detail is a reported FACT not a
+prediction / SILENT on every existing snapshot) + the 2-pass real
+cargo-mutants evidence above; deliberately NOT subagent-delegated (the
+D-008 review-subagent integrity incident). Recorded as a substitution,
+not an independent SHIP. No false green.
