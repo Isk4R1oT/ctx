@@ -762,3 +762,36 @@ not an independent SHIP.
   evidence above; deliberately NOT subagent-delegated (the D-008
   review-subagent integrity incident). Recorded as a substitution, not
   an independent SHIP. No false green.
+
+---
+
+## C4 / D-014 — integration verification (worktree-isolation breach, independently re-verified)
+
+Process anomaly recorded honestly (not silently): the C4 agent's
+worktree isolation did NOT hold — its 4 commits (bb06a4c/8661dd0/
+8fe95de/17ceff9) landed directly on `main`, no `worktree-agent-*`
+branch (the 2nd isolation breach this session; C3 earlier leaked
+uncommitted files). This bypassed the planned independent integration
+gate, so it was re-verified from scratch on `main@17ceff9`, NOT trusted
+from the agent self-report:
+
+- `git merge-base --is-ancestor dc895aa HEAD` ⇒ wave-1 merge is an
+  intact ancestor (no history loss); main = dc895aa + exactly C4's 4
+  linear commits; tree clean.
+- adapter.rs change verified ADDITIVE-only (zero `-` deletions on any
+  existing `pub`/struct line) — `Assembled.sampling` is a new field,
+  the wave-1 HALT condition (no shape break) holds; snapshot delta is
+  exactly the additive `"sampling": []` (+ benign insta metadata),
+  D-005 `--json` contract intact.
+- `just test` 138/138 + doctests; `just check` clippy `-D warnings` 0;
+  `cargo deny`/`machete` ok (no new deps).
+- cargo-mutants `--in-diff` on C4's delta: REAL baseline
+  `ok 21s build + 6s test` (non-vacuous), 23 mutants → 20 caught,
+  3 unviable, **0 missed**.
+- Purity confirmed by read: pure `param_change`/`step_namespace`,
+  `wasted_tokens: 0` hard-zero, the agentlock non-determinism
+  attribution EXCLUDED in-code, evalint stays KILLED.
+
+Conclusion: C4 is correct and honestly green ON MAIN despite the
+isolation breach — accepted. `.gitignore` now excludes
+`/.claude/worktrees/` (added by C4; legitimate hygiene).
