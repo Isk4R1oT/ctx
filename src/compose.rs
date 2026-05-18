@@ -2563,4 +2563,63 @@ mod tests {
         // discipline; `non_text_of` would not have emitted it anyway):
         assert_eq!(kind_tally(&[p("text")]), "");
     }
+
+    // C7 (D-016) — header-drift, LIVE-ONLY. Tracked request-header facts
+    // (anthropic-version / anthropic-beta / openai-beta / content-
+    // encoding / accept-encoding) changing across same-(provider,model)
+    // turns. PURE MEASUREMENT (value (in)equality + step index); a
+    // reported determinism-surface fact, NOT a non-determinism claim
+    // (evalint KILLED). Auth headers are already REDACTED on capture so
+    // no secret is surfaced. `store.rs` does not persist request headers
+    // (D-009), so `ctx open` of a saved session honestly emits NOTHING
+    // (degrades to silence, never fabricates) — the LIVE-ONLY limit;
+    // a full post-hoc C7 needs a store.rs header-allowlist persistence
+    // (shared F0 substrate, deferred — see D-016).
+    #[test]
+    #[ignore = "C7/D-016 red-first: header-drift not implemented at the test commit; un-ignored at the impl commit (the D-010/C4 commit-gate-green pattern)"]
+    fn header_drift_fires_on_a_tracked_header_change_same_namespace() {
+        let body = br#"{"model":"claude-x","messages":[{"role":"user","content":"a reasonably long question for the header drift fixture"}]}"#;
+        // Same (provider, model); a tracked header (anthropic-beta)
+        // changes between the two turns ⇒ header-drift MUST fire.
+        let mut t = Timeline::new();
+        t.record_request(
+            "POST",
+            "/v1/messages",
+            &[("anthropic-beta".to_string(), "prompt-caching-2024-07-31".to_string())],
+            body,
+        );
+        t.record_request(
+            "POST",
+            "/v1/messages",
+            &[("anthropic-beta".to_string(), "message-batches-2024-09-24".to_string())],
+            body,
+        );
+        assert!(
+            has_code(&t, "header-drift"),
+            "a changed tracked request header across same-(provider,model) turns MUST be indicted"
+        );
+        let d = compose(&t, false)
+            .indictments
+            .into_iter()
+            .find(|i| i.code == "header-drift")
+            .expect("header-drift indictment present");
+        assert!(
+            d.detail.contains("anthropic-beta") && d.detail.contains("step 1"),
+            "detail must name the header + the step it changed at: {}",
+            d.detail
+        );
+        assert_eq!(
+            d.wasted_tokens, 0,
+            "a header change re-bills no prompt tokens — wasted_tokens must be 0"
+        );
+        // Post-hoc honesty: with NO headers (store.rs does not persist
+        // them) the same bodies must NOT fabricate a drift.
+        let mut posthoc = Timeline::new();
+        posthoc.record_request("POST", "/v1/messages", &[], body);
+        posthoc.record_request("POST", "/v1/messages", &[], body);
+        assert!(
+            !has_code(&posthoc, "header-drift"),
+            "no captured headers (post-hoc) ⇒ header-drift must be SILENT, never fabricated"
+        );
+    }
 }
