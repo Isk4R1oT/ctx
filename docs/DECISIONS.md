@@ -612,6 +612,120 @@ in-thread ⇒ substituted by an in-thread tool-grounded self-review (pure
 tool=remove+add) — deliberately NOT subagent-delegated (D-008 integrity
 incident). Recorded as a substitution, not an independent SHIP. No false
 green.
+## D-012 — C3: context-window headroom & growth-rate slope, a new pure-measurement signal (2026-05-18)
+
+### Status: LOCKED. Additive (the PROJECT.md §8 static-registry seam, alongside the F1 headline). Does not relitigate D-001..D-011; evalint stays KILLED.
+
+**Why.** Frameworks silently grow the assembled context turn over turn;
+the single most-cited agent pain is not seeing *what is actually in the
+window* and *how fast it is filling*. Every incumbent shows per-call
+token *totals*; none plots the assembled-context growth slope vs the
+model's window from the **wire**, because their SDK→DB→dashboard
+architecture does not model the prompt as a per-step series of assembled
+bytes. `ctx` already holds that series (the F0 timeline `prompt_tokens`).
+Ranked **MED** by the independent research artifact
+`docs/CONTEXT-SIGNALS-RESEARCH.md` §(c) C3 — *MED not for the code
+(trivial) but for the discipline risk*: a "headroom / turns remaining"
+framing is one wording slip away from a quality *prediction* (evalint,
+KILLED). This entry records the constraint that keeps it pure.
+
+**The signal (pure measurement).** Per the focus step (the last
+structurally-parsed step, same as the F1 headline focus):
+- **Window fraction** — `prompt_tokens` (the existing F0-computed ±N%
+  estimate) as an integer percent of the model's context window. The
+  window is a **static offline registry** (`src/window.rs`, the §8
+  seam), keyed by a case-insensitive longest-substring match on the
+  wire model id, carrying its own honest label `WINDOW_LABEL`
+  ("offline static window table, approximate (never calls an API)") —
+  the C3 analogue of the tokenizer's `±N%`. No API call (zero-config
+  core).
+- **Growth slope** — the measured mean `(last − first) / (turns − 1)`
+  tokens/turn over the **same-(provider, model)** turns (a different
+  model is a different budget; its turns are not in the series). Signed
+  `i64` (a shrinking session is a real negative slope, never clamped).
+- **Headline = the fraction + the slope ONLY.** Integer-only
+  (`used_pct`, `slope_tokens_per_turn`), snapshot-stable, no float —
+  mirrors the existing `pct` integer discipline; additive
+  `Composition.headroom: Option<Headroom>` preserves the D-005 `--json`
+  contract (`steps` stays top-level — verified at `report_json`).
+
+**The DISCIPLINE constraint that keeps it pure (the reason this is a
+signal, not evalint).** Any "turns remaining" figure is a *projection*,
+which is contestable. It is therefore:
+- **`--deep`-ONLY** (absent from the headline and from non-`--deep`
+  `--json`; gated in `compose`, the renderer never decides), and
+- **worded as neutral arithmetic** — verbatim: *"at the observed mean
+  rate (~S tok/turn over N turn(s)), ~K more turn(s) before the W-tok
+  window is reached (neutral arithmetic projection, not a prediction)"*.
+  It NEVER says "you will overflow", "the model will truncate", "you
+  will run out" — a test (`c3_projection_is_deep_only_and_neutrally_
+  worded` + the snapshot guards) makes that banned-phrasing class a hard
+  CI failure forever. The extrapolation is pure division on the labeled
+  estimates, not a claim about fate (that would be evalint — EXCLUDED,
+  CONTEXT-SIGNALS-RESEARCH.md §(d)).
+
+**Honest limits (recorded, not buried).**
+- The window table is a **maintained approximation** — context-window
+  sizes drift per model release (`[INFER]`, research §(e)); labeled like
+  the ±N% tokenizer, never sold as exact.
+- An **unknown wire model id ⇒ NO window claim** (skipped honestly,
+  `headroom: None` — never a guessed size/fraction). A session with
+  **< 2 same-namespace turns ⇒ no measurable slope ⇒ no C3 claim** at
+  all. The two gates are independent (a known model with one turn is
+  still silent).
+- The token figures ride the existing offline ±N% tokenizer (byte→token
+  is an approximation); the slope is exact integer arithmetic on that
+  approximate series. Request-only; round-trips post-hoc (`ctx open`).
+- The slope is a coarse `(last − first)/(turns − 1)` mean, not a fitted
+  regression — deliberately the simplest honest arithmetic (research
+  §(c) "least-effort"), no smoothing, no trend claim.
+
+**Gates (real, non-vacuous).** TDD red-first: the `c3_*` compose tests
+**fail to compile on the worktree HEAD** (`no field 'headroom' on
+Composition`, 7×) with the rest of the suite green (109 nextest + 91
+lib) — proven before impl. Compiler-truth loop (`just check`,
+clippy `-D warnings` incl. pedantic): the digest named
+*too-many-lines* / *u128-as-u32-truncate* / *useless-conversion*; fixed
+root-cause-first (extracted `headroom_tty`; replaced the lossy test
+cast with the exact `pct()` check). `just test` = **129 nextest + 100
+lib** green + doctests; `cargo deny`/`machete` ok (no new deps —
+`window.rs` is pure data + std). cargo-mutants `--in-diff` on the C3
+surface, REAL baselines (explicitly not vacuous/timed-out):
+- **Run 1** — baseline `ok 25s build + 8s test`, 28 mutants → **1
+  MISSED**: `replace && with || in headroom` (the `provider && model`
+  series filter; all prior fixtures used a single namespace so `&&`≡
+  `||`). **NOT accepted.** Eliminated **BY CONSTRUCTION** (the proven
+  D-010 technique): the namespace match became a single `(provider,
+  model)` **tuple equality** via the pure `step_namespace` helper — no
+  `&&` operator remains to widen into a namespace-crossing `||` — plus
+  a discriminating mixed-namespace fixture (a foreign `gpt-4o` step
+  wedged between focus Anthropic turns; pins `turns == 2`, not 3) and
+  exact-value `step_namespace` pins.
+- **Run 2** — baseline `ok 31s build + 14s test`, 29 mutants → **25
+  caught, 4 unviable, 0 MISSED**. The pure helpers `slope_per_turn` /
+  `turns_until_window` carry deterministic exact-boundary unit tables
+  (the approximate tokenizer cannot reach those boundaries through
+  `compose`); every `window.rs` table entry is exact-value pinned.
+
+Real e2e (green ≠ works): a real python-httpx **multi-turn growing**
+conversation through `ctx run --save /tmp/c3.db` (DUMMY
+`Authorization: Bearer test`, natural `/v1/chat/completions` — upstream
+404s, request captured BEFORE forward, $0, no real key). `ctx open`
+headline shows `window gpt-4o 561/128000 tok 0% slope 146 tok/turn over
+4 turn(s) (...approximate...)` and **no** projection; `ctx --deep open`
+adds exactly `window-projection at the observed mean rate (~146
+tok/turn over 4 turn(s)), ~872 more turn(s) before the 128000-tok
+window is reached (neutral arithmetic projection, not a prediction)`.
+A single-turn known-model session and an unknown-model session each
+emit **zero** window claims even with `--deep`. `--json`/`--deep
+--json` confirm `steps` top-level + integer-only `headroom`.
+`/rust-review`/`/rust-harden` skills not invocable in-thread →
+substituted by the tool-grounded compiler-truth loop + the 2-pass real
+cargo-mutants evidence above; deliberately NOT subagent-delegated
+(D-008 integrity incident). Recorded as a substitution, not an
+independent SHIP. evalint stays KILLED — no kill-zone, no graph, no
+hosted anything; no false green.
+
 ## D-013 — C6: request-replayed, a new pure-measurement F1 indictment (2026-05-18)
 
 ### Status: LOCKED. Additive (the PROJECT.md §8 "versioned indictment ruleset" seam). Does not relitigate D-001..D-010; evalint stays KILLED; graph stays REFUTED.

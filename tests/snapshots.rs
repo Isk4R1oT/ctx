@@ -124,6 +124,113 @@ fn f1_composition_tty_render() {
     insta::assert_snapshot!(s);
 }
 
+// --- C3 (D-012) context-window headroom & growth-rate slope -----------
+//
+// A KNOWN-model multi-turn fixture so the C3 contract is pinned: the
+// JSON `headroom` object, the plain grep-clean record, and the deep
+// projection are all integer-only / snapshot-stable (no float — the
+// `pct`/`slope` integer discipline). The headline carries only the
+// measured fraction + slope; the projection is `--deep`-only and
+// neutrally worded.
+fn c3_fixture() -> Timeline {
+    let mut t = Timeline::new();
+    // Real Anthropic wire model id ⇒ the static offline window table
+    // resolves it to 200_000. History grows by a fixed block each turn.
+    let block = "a stable user sentence of fixed length for the snapshot fixture ".repeat(20);
+    for turn in 1..=3usize {
+        let msgs: Vec<String> = (0..turn)
+            .map(|k| format!(r#"{{"role":"user","content":"{block} #{k}"}}"#))
+            .collect();
+        let body = format!(
+            r#"{{"model":"claude-3-5-sonnet-20241022","system":"You are a careful, terse assistant for snapshot tests.","messages":[{}]}}"#,
+            msgs.join(",")
+        );
+        let i = t.record_request("POST", "/v1/messages", &[], body.as_bytes());
+        t.record_response(i, 200, &[], br#"{"content":[{"type":"text","text":"ok"}]}"#);
+    }
+    t
+}
+
+#[test]
+fn c3_headroom_json_contract() {
+    // Integer-only, snapshot-stable Headroom object (no float). With
+    // `--deep` the neutral projection string is present and worded
+    // "at the observed mean rate" — never as fate.
+    insta::assert_json_snapshot!(compose(&c3_fixture(), true).headroom);
+}
+
+#[test]
+fn c3_headline_has_fraction_and_slope_but_not_projection() {
+    // Headline (NOT --deep): the measured fraction + slope appear; the
+    // neutral projection MUST be absent (it is --deep-only).
+    let mut buf = Vec::new();
+    Renderer::new(ColorMode::None)
+        .composition(&mut buf, &compose(&c3_fixture(), false))
+        .unwrap();
+    let s = String::from_utf8(buf).unwrap();
+    assert!(!s.contains('\u{1b}'), "plain mode emits zero escapes");
+    assert!(
+        s.contains("window claude-3-5-sonnet-20241022") && s.contains("slope "),
+        "headline must show the measured fraction + slope: {s}"
+    );
+    assert!(
+        !s.contains("window-projection"),
+        "the projection must be --deep-only, absent from the headline: {s}"
+    );
+    insta::assert_snapshot!(s);
+}
+
+#[test]
+fn c3_deep_adds_neutral_projection_only() {
+    // --deep: the neutral mean-rate projection appears, worded
+    // "at the observed mean rate", and asserts NO fate.
+    let mut buf = Vec::new();
+    Renderer::new(ColorMode::None)
+        .composition(&mut buf, &compose(&c3_fixture(), true))
+        .unwrap();
+    let s = String::from_utf8(buf).unwrap();
+    assert!(
+        s.contains("window-projection") && s.contains("at the observed mean rate"),
+        "--deep must add the neutral mean-rate projection: {s}"
+    );
+    for banned in ["will overflow", "will truncate", "you will", "run out"] {
+        assert!(
+            !s.to_lowercase().contains(banned),
+            "projection must not assert fate ({banned}): {s}"
+        );
+    }
+    insta::assert_snapshot!(s);
+}
+
+#[test]
+fn c3_unknown_model_emits_no_window_line() {
+    // The discipline rule, at the render boundary: an unknown model ⇒
+    // NO window claim anywhere in the output (the f1_fixture model is
+    // "m", not in the table).
+    let mut buf = Vec::new();
+    Renderer::new(ColorMode::None)
+        .composition(&mut buf, &compose(&f1_fixture(), true))
+        .unwrap();
+    let s = String::from_utf8(buf).unwrap();
+    assert!(
+        !s.contains("window ") && !s.contains("window-projection"),
+        "an unknown model must emit no window claim: {s}"
+    );
+}
+
+#[test]
+fn c3_headroom_tty_render() {
+    let mut buf = Vec::new();
+    Renderer::new(ColorMode::Truecolor)
+        .composition(&mut buf, &compose(&c3_fixture(), true))
+        .unwrap();
+    let s = String::from_utf8(buf).unwrap();
+    assert!(s.contains('\u{23FA}'), "TTY render carries the ⏺ glyph");
+    assert!(!s.chars().any(|c| c as u32 >= 0x1_F000), "no emoji");
+    assert!(s.contains("Window"), "the C3 TTY section header");
+    insta::assert_snapshot!(s);
+}
+
 // --- F2 verbatim-context contracts ------------------------------------
 
 // Test-support fixture: the timeline is constructed right here with one

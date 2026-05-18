@@ -1,0 +1,14 @@
+---
+source: tests/snapshots.rs
+assertion_line: 159
+expression: "compose(&c3_fixture(), true).headroom"
+---
+{
+  "model": "claude-3-5-sonnet-20241022",
+  "window_tokens": 200000,
+  "used_tokens": 680,
+  "used_pct": 0,
+  "turns": 3,
+  "slope_tokens_per_turn": 223,
+  "projection": "at the observed mean rate (~223 tok/turn over 3 turn(s)), ~893 more turn(s) before the 200000-tok window is reached (neutral arithmetic projection, not a prediction)"
+}

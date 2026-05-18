@@ -1,5 +1,6 @@
 ---
 source: tests/snapshots.rs
+assertion_line: 81
 expression: "compose(&f1_fixture(), true)"
 ---
 {
@@ -60,5 +61,6 @@ expression: "compose(&f1_fixture(), true)"
       "detail": "system prompt re-paid: 1 extra payment(s) across 1 variant(s)",
       "wasted_tokens": 11
     }
-  ]
+  ],
+  "headroom": null
 }

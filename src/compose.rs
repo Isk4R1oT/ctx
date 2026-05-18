@@ -36,6 +36,40 @@ pub struct Indictment {
     pub wasted_tokens: usize,
 }
 
+/// C3 (D-012) — context-window headroom & growth-rate slope. PURE
+/// MEASUREMENT: a fraction of the model's window (the labeled offline
+/// table) plus the measured tokens/turn slope (arithmetic on the
+/// labeled ±N% token series). It asserts NOTHING about overflow or
+/// truncation (that would be evalint — EXCLUDED). The only contestable
+/// part — a *projection* of turns until the window is reached — is a
+/// NEUTRAL arithmetic, `--deep`-only, worded "at the observed mean
+/// rate", never as fate. `None` when the model id is not in the table
+/// (no window claim) or the session has < 2 turns (no measured slope).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Headroom {
+    /// The wire model id this window size was resolved for.
+    pub model: String,
+    /// Context-window budget from the static offline table (labeled
+    /// approximation — `window::WINDOW_LABEL`, like the tokenizer ±N%).
+    pub window_tokens: usize,
+    /// Focus step's assembled prompt tokens (the ±N% token estimate).
+    pub used_tokens: usize,
+    /// `used_tokens / window_tokens` as an integer percent (floored) —
+    /// no float, snapshot-stable (mirrors `Component::pct`).
+    pub used_pct: u32,
+    /// Number of same-(provider,model) turns the slope was measured over.
+    pub turns: usize,
+    /// Measured mean growth of the assembled prompt, tokens/turn:
+    /// `(last - first) / (turns - 1)`. Signed (a shrinking session is a
+    /// real measured negative slope, never clamped to a guess).
+    pub slope_tokens_per_turn: i64,
+    /// `--deep`-ONLY neutral arithmetic projection ("at the observed
+    /// mean rate, ~N more turn(s) before the window is reached"). `None`
+    /// in the headline and whenever the slope is non-positive (a flat or
+    /// shrinking session has no honest "turns remaining" arithmetic).
+    pub projection: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Composition {
     /// The step whose breakdown is shown (last step with a parsed prompt).
@@ -45,6 +79,9 @@ pub struct Composition {
     /// Per-tool token detail — only populated when `--deep`.
     pub tools_deep: Vec<Component>,
     pub indictments: Vec<Indictment>,
+    /// C3 (D-012) context-window headroom & slope. Additive (preserves
+    /// the D-005 `--json` contract); `None` ⇒ no window claim / no slope.
+    pub headroom: Option<Headroom>,
 }
 
 fn pct(part: usize, total: usize) -> u32 {
@@ -52,6 +89,48 @@ fn pct(part: usize, total: usize) -> u32 {
         .checked_div(total)
         .and_then(|v| u32::try_from(v).ok())
         .unwrap_or(0)
+}
+
+/// C3 (D-012) — measured mean growth of the assembled prompt across a
+/// same-(provider,model) session, in tokens/turn: `(last - first) /
+/// (turns - 1)`. PURE ARITHMETIC on the already-counted ±N% token
+/// series. Signed `i64`: a shrinking session is a real negative slope,
+/// never clamped (clamping would fabricate a measurement). `None` for
+/// < 2 turns (no two points ⇒ no measurable rate). Truncating integer
+/// division is intentional and snapshot-stable (no float in the
+/// contract, mirrors the `pct` integer discipline). Extracted as a pure
+/// helper with exact-value unit pins (the proven D-010 technique — the
+/// approximate tokenizer cannot hit these boundaries through `compose`).
+fn slope_per_turn(first_tok: usize, last_tok: usize, turns: usize) -> Option<i64> {
+    let span = turns.checked_sub(1)?;
+    if span == 0 {
+        return None; // a single turn has no measurable growth rate
+    }
+    let first = i64::try_from(first_tok).ok()?;
+    let last = i64::try_from(last_tok).ok()?;
+    let span = i64::try_from(span).ok()?;
+    Some((last - first) / span)
+}
+
+/// C3 (D-012) — the NEUTRAL `--deep` arithmetic projection: at the
+/// measured mean rate, how many further turns of the same growth before
+/// the window budget is reached. PURE ARITHMETIC, phrased as a
+/// mean-rate extrapolation, NEVER asserted as fate (no "will overflow /
+/// will truncate" — that is evalint, EXCLUDED). `None` unless the slope
+/// is strictly positive and there is remaining budget (a flat /
+/// shrinking / already-over session has no honest "turns remaining"
+/// arithmetic — say nothing rather than fabricate one).
+fn turns_until_window(used_tok: usize, window_tok: usize, slope: i64) -> Option<usize> {
+    if slope <= 0 {
+        return None; // not growing ⇒ no honest "turns remaining" figure
+    }
+    let slope = usize::try_from(slope).ok()?;
+    let remaining = window_tok.checked_sub(used_tok)?;
+    if remaining == 0 {
+        return None; // already at/over the window ⇒ no positive headroom
+    }
+    // Ceil-free floor division: whole turns of headroom at the mean rate.
+    Some(remaining / slope)
 }
 
 /// Byte-length floor below which a message is trivial role-glue, not an
@@ -194,7 +273,76 @@ pub fn compose(timeline: &Timeline, deep: bool) -> Composition {
         components,
         tools_deep,
         indictments: indict(timeline),
+        headroom: headroom(timeline, deep),
     }
+}
+
+/// C3 (D-012) — context-window headroom & growth-rate slope. PURE
+/// MEASUREMENT. The window comes from the static offline table keyed by
+/// the focus step's wire model id (`window::window_for`); an unknown id
+/// ⇒ `None` (NO window claim — skipped honestly, never guessed). The
+/// slope is the measured mean tokens/turn across the **same
+/// (provider, model)** turns (a different model is a different budget,
+/// so its turns are not in this series). The `--deep`-ONLY projection is
+/// a neutral mean-rate arithmetic, never asserted as fate.
+fn headroom(timeline: &Timeline, deep: bool) -> Option<Headroom> {
+    // Focus = the last structurally-parsed step (same as `compose`'s
+    // headline focus). C3 has no honest meaning on a Layer-2 raw body
+    // (no model id, no per-turn series) — skip rather than fabricate.
+    let focus = timeline
+        .steps
+        .iter()
+        .rev()
+        .find(|s| s.assembled.is_some())?;
+    let provider = focus.provider?;
+    let model = focus.assembled.as_ref()?.model.as_deref()?.to_owned();
+    let window_tokens = crate::window::window_for(&model)?;
+
+    // The per-turn assembled-token series, scoped to the SAME
+    // (provider, model) namespace as the focus step. `prompt_tokens` is
+    // the F0-computed ±N% estimate already on every step.
+    let series: Vec<usize> = timeline
+        .steps
+        .iter()
+        .filter(|s| {
+            s.provider == Some(provider)
+                && s.assembled.as_ref().and_then(|a| a.model.as_deref()) == Some(model.as_str())
+        })
+        .map(|s| s.prompt_tokens)
+        .collect();
+    let turns = series.len();
+    let first = *series.first()?;
+    let last = *series.last()?;
+    // The measured slope needs >=2 turns; < 2 ⇒ no measurable rate ⇒
+    // skip the whole C3 claim honestly (no slope, no headline).
+    let slope_tokens_per_turn = slope_per_turn(first, last, turns)?;
+
+    let used_tokens = focus.prompt_tokens;
+    let used_pct = pct(used_tokens, window_tokens);
+
+    // `--deep` ONLY: the neutral arithmetic projection. Worded as a
+    // mean-rate extrapolation, NEVER as fate (no "will overflow /
+    // truncate" — evalint, EXCLUDED). Absent in the headline and when
+    // the slope is non-positive (no honest "turns remaining" arithmetic).
+    let projection = if deep {
+        turns_until_window(used_tokens, window_tokens, slope_tokens_per_turn).map(|n| {
+            format!(
+                "at the observed mean rate (~{slope_tokens_per_turn} tok/turn over {turns} turn(s)), ~{n} more turn(s) before the {window_tokens}-tok window is reached (neutral arithmetic projection, not a prediction)"
+            )
+        })
+    } else {
+        None
+    };
+
+    Some(Headroom {
+        model,
+        window_tokens,
+        used_tokens,
+        used_pct,
+        turns,
+        slope_tokens_per_turn,
+        projection,
+    })
 }
 
 /// All indictments — each rule is its own pure-measurement helper.
@@ -1137,7 +1285,7 @@ mod tests {
         assert_eq!(cache_break_wasted(200, 999, 256), None); // >  (kills >=→==/<=/<)
         assert_eq!(cache_break_wasted(130, 999, 256), None); // 260>=256 (kills *→+: 132<256)
         assert_eq!(cache_break_wasted(86, 999, 256), Some(170)); // 172<256 (kills *2→*3: 258>=256)
-        // saturating: no panic / wrap at the extreme.
+                                                                 // saturating: no panic / wrap at the extreme.
         assert_eq!(cache_break_wasted(usize::MAX, 64, 256), None);
     }
 
@@ -1149,7 +1297,7 @@ mod tests {
         assert_eq!(common_prefix_len("xyz", "abc"), 0);
         // multi-byte: stop on the differing char, never mid-codepoint.
         assert_eq!(common_prefix_len("héllo", "héXlo"), 3); // 'h' + 'é'(2B)
-        // suffix, capped so it can never overlap the prefix region.
+                                                            // suffix, capped so it can never overlap the prefix region.
         assert_eq!(common_suffix_len("abcTAIL", "zzzTAIL", 4), 4);
         assert_eq!(common_suffix_len("abcTAIL", "zzzTAIL", 2), 2); // cap binds
         assert_eq!(common_suffix_len("abc", "abc", 100), 3);
@@ -1312,8 +1460,11 @@ mod tests {
             "the quick brown fox jumps over the lazy dog ".repeat(40)
         );
         let mk = |model: &str, sys_fill: &str| {
-            format!(r#"{{"model":"{model}","system":"{}"{big_tail}"#, sys_fill.repeat(400))
-                .into_bytes()
+            format!(
+                r#"{{"model":"{model}","system":"{}"{big_tail}"#,
+                sys_fill.repeat(400)
+            )
+            .into_bytes()
         };
 
         // FIRES: tiny common prefix (system diverges almost immediately),
@@ -1330,7 +1481,10 @@ mod tests {
             .into_iter()
             .find(|i| i.code == "cache-prefix-break")
             .unwrap();
-        assert!(w.wasted_tokens > 0, "must report the re-sent broken-tail cost");
+        assert!(
+            w.wasted_tokens > 0,
+            "must report the re-sent broken-tail cost"
+        );
 
         // NOT FIRES — healthy: long identical prefix (stable system +
         // early messages), conversation only grows at the end.
@@ -1379,7 +1533,10 @@ mod tests {
         // NOT FIRES — single step (needs >=2 same-provider+model).
         let mut one = Timeline::new();
         one.record_request("POST", "/v1/messages", &[], &mk("m", "S"));
-        assert!(!has_code(&one, "cache-prefix-break"), "one step cannot break a cache prefix");
+        assert!(
+            !has_code(&one, "cache-prefix-break"),
+            "one step cannot break a cache prefix"
+        );
 
         // NOT FIRES — different model (prefix cache is per model).
         let mut diff_model = Timeline::new();
@@ -1530,6 +1687,198 @@ mod tests {
             ind.detail.contains('2'),
             "detail must report 2 re-billed copies: {}",
             ind.detail
+        );
+    }
+
+    // --- C3 (D-012) context-window headroom & growth-rate slope --------
+    //
+    // PURE MEASUREMENT. Headline = the measured window fraction + the
+    // measured tokens/turn slope only (arithmetic on the labeled ±N%
+    // token series and the labeled offline window table). The
+    // "turns remaining at the observed mean rate" projection is a
+    // NEUTRAL arithmetic, `--deep` ONLY, never asserted as fate
+    // (that would be evalint — EXCLUDED). Unknown model id ⇒ NO window
+    // claim (skipped honestly, never guessed). Request-only.
+
+    /// A growing same-(provider,model) session: 3 turns whose prompt
+    /// grows by a fixed history increment each turn (the C3 slope is the
+    /// per-turn growth). Model id is a real Anthropic wire id ⇒ the
+    /// static window table resolves it.
+    fn growing_session(model: &str) -> Timeline {
+        let mut t = Timeline::new();
+        let big = "a reasonably substantial user message of stable length ".repeat(40);
+        for turn in 1..=3usize {
+            let msgs: Vec<String> = (0..turn)
+                .map(|k| format!(r#"{{"role":"user","content":"{big} #{k}"}}"#))
+                .collect();
+            let body = format!(
+                r#"{{"model":"{model}","system":"You are a careful, terse assistant.","messages":[{}]}}"#,
+                msgs.join(",")
+            );
+            let i = t.record_request("POST", "/v1/messages", &[], body.as_bytes());
+            t.record_response(i, 200, &[], br#"{"content":[{"type":"text","text":"ok"}]}"#);
+        }
+        t
+    }
+
+    #[test]
+    fn c3_headline_is_the_measured_fraction_and_slope_for_a_known_model() {
+        let c = compose(&growing_session("claude-3-5-sonnet-20241022"), false);
+        let h = c
+            .headroom
+            .as_ref()
+            .expect("a known model + >=2 turns must yield a headroom measurement");
+        // Window resolved from the static offline table (NOT guessed).
+        assert_eq!(h.window_tokens, 200_000);
+        assert_eq!(h.model, "claude-3-5-sonnet-20241022");
+        // The fraction is the focus step's prompt tokens / window — a
+        // pure integer-percent measurement (snapshot-stable, like `pct`).
+        assert!(h.used_tokens > 0);
+        assert!(
+            h.used_pct < 100,
+            "this fixture is well under the window: {}%",
+            h.used_pct
+        );
+        // Exact integer-percent check (no lossy cast): used_pct is the
+        // floored `used*100/window`, the same discipline as `pct()`.
+        let expect_pct = pct(h.used_tokens, h.window_tokens);
+        assert_eq!(h.used_pct, expect_pct, "fraction = floor(used*100/window)");
+        // The slope is the MEASURED mean growth across the session
+        // (tokens/turn). This fixture strictly grows ⇒ slope > 0.
+        assert_eq!(h.turns, 3);
+        assert!(
+            h.slope_tokens_per_turn > 0,
+            "a strictly growing session has a positive measured slope, got {}",
+            h.slope_tokens_per_turn
+        );
+        // The neutral arithmetic projection is `--deep` ONLY — it must
+        // NOT appear in the non-deep headline data.
+        assert!(
+            h.projection.is_none(),
+            "the headroom projection must be --deep-only, not in the headline"
+        );
+    }
+
+    #[test]
+    fn c3_projection_is_deep_only_and_neutrally_worded() {
+        let c = compose(&growing_session("claude-3-5-sonnet-20241022"), true);
+        let h = c.headroom.as_ref().expect("known model + >=2 turns");
+        let p = h
+            .projection
+            .as_ref()
+            .expect("--deep must add the neutral arithmetic projection");
+        // Neutral arithmetic phrasing ONLY — the research-doc discipline:
+        // "at the observed mean rate", never asserted as fate.
+        assert!(
+            p.contains("at the observed mean rate"),
+            "projection must be phrased as a neutral mean-rate arithmetic: {p:?}"
+        );
+        // It must NEVER assert overflow / truncation / prediction
+        // (that is evalint — EXCLUDED by construction).
+        for banned in [
+            "will overflow",
+            "will truncate",
+            "you will",
+            "run out",
+            "exceed",
+        ] {
+            assert!(
+                !p.to_lowercase().contains(banned),
+                "projection must not assert fate ({banned:?}): {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn c3_unknown_model_makes_no_window_claim() {
+        // Discipline rule: an unknown wire model id ⇒ NO window claim.
+        // Skipped honestly (None), never a fabricated window/fraction.
+        let c = compose(&growing_session("totally-unreleased-model-9000"), true);
+        assert!(
+            c.headroom.is_none(),
+            "an unknown model must yield NO headroom (no window claim), got {:?}",
+            c.headroom
+        );
+    }
+
+    #[test]
+    fn c3_single_turn_has_no_slope_so_no_headroom() {
+        // The slope needs >=2 turns (last-first over turns). A single
+        // turn cannot have a measured growth rate ⇒ skip honestly.
+        let mut t = Timeline::new();
+        t.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"claude-3-5-sonnet-20241022","system":"s","messages":[{"role":"user","content":"a short question here for the test"}]}"#,
+        );
+        let c = compose(&t, true);
+        assert!(
+            c.headroom.is_none(),
+            "a single turn has no measured slope ⇒ no C3 headroom, got {:?}",
+            c.headroom
+        );
+    }
+
+    #[test]
+    fn c3_slope_per_turn_exact_boundaries() {
+        // Deterministic exact-value table — the approximate tokenizer
+        // cannot hit these boundaries through compose(), so the pure
+        // decision is pinned here (the proven D-010 technique). Each row
+        // kills a specific arithmetic/comparison mutant.
+        // < 2 turns ⇒ None (no measurable rate); == 2 ⇒ Some.
+        assert_eq!(slope_per_turn(100, 100, 0), None);
+        assert_eq!(slope_per_turn(100, 100, 1), None);
+        assert_eq!(slope_per_turn(100, 300, 2), Some(200)); // (300-100)/1
+                                                            // span = turns - 1 (kills `-`→`+` and off-by-one on the divisor):
+        assert_eq!(slope_per_turn(100, 400, 4), Some(100)); // (400-100)/3
+                                                            // flat ⇒ exactly 0 (kills a mutant that fabricates growth):
+        assert_eq!(slope_per_turn(500, 500, 3), Some(0));
+        // shrinking ⇒ a real NEGATIVE slope, never clamped to 0:
+        assert_eq!(slope_per_turn(900, 300, 3), Some(-300)); // (300-900)/2
+                                                             // truncating integer division is intentional & snapshot-stable:
+        assert_eq!(slope_per_turn(0, 10, 3), Some(5)); // 10/2
+        assert_eq!(slope_per_turn(0, 10, 4), Some(3)); // 10/3 floor
+    }
+
+    #[test]
+    fn c3_turns_until_window_exact_boundaries() {
+        // The NEUTRAL `--deep` projection arithmetic. slope <= 0 ⇒ None
+        // (no honest "turns remaining" — kills `<=`→`<`/`==`):
+        assert_eq!(turns_until_window(100, 1000, 0), None);
+        assert_eq!(turns_until_window(100, 1000, -5), None);
+        // remaining = window - used; whole turns at the mean rate:
+        assert_eq!(turns_until_window(100, 1000, 100), Some(9)); // 900/100
+        assert_eq!(turns_until_window(0, 1000, 300), Some(3)); // 1000/300 floor
+                                                               // used == window ⇒ no positive headroom ⇒ None (kills the
+                                                               // `remaining == 0` guard and `checked_sub` underflow):
+        assert_eq!(turns_until_window(1000, 1000, 50), None);
+        // used > window ⇒ checked_sub None ⇒ None (no negative figure):
+        assert_eq!(turns_until_window(1500, 1000, 50), None);
+    }
+
+    #[test]
+    fn c3_slope_is_signed_and_zero_when_flat() {
+        // A same-size repeated prompt across turns ⇒ measured slope 0
+        // (pins the arithmetic against a mutant that fabricates growth).
+        let mut t = Timeline::new();
+        let body = br#"{"model":"gpt-4o-2024-08-06","messages":[{"role":"system","content":"sys"},{"role":"user","content":"an identical, stable user prompt repeated each turn here"}]}"#;
+        for _ in 0..3 {
+            let i = t.record_request("POST", "/v1/chat/completions", &[], body);
+            t.record_response(
+                i,
+                200,
+                &[],
+                br#"{"choices":[{"message":{"content":"ok"}}]}"#,
+            );
+        }
+        let h = compose(&t, false)
+            .headroom
+            .expect("known model + 3 turns ⇒ headroom present");
+        assert_eq!(h.window_tokens, 128_000);
+        assert_eq!(
+            h.slope_tokens_per_turn, 0,
+            "a flat (non-growing) session has a measured slope of exactly 0"
         );
     }
 }

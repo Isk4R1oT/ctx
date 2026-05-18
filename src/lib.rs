@@ -19,6 +19,7 @@ pub mod store;
 pub mod timeline;
 pub mod tokenizer;
 pub mod view;
+pub mod window;
 
 pub use error::{Error, Result};
 
