@@ -133,6 +133,17 @@ fn turns_until_window(used_tok: usize, window_tok: usize, slope: i64) -> Option<
     Some(remaining / slope)
 }
 
+/// C3 (D-012) — a step's cache/budget **namespace**: `(provider,
+/// model)`, or `None` when either is unknown (an unparsed/unknown step
+/// is not in any namespace, never a guess). Returned as ONE tuple so the
+/// `headroom` series filter is a single tuple equality — there is no
+/// `provider && model` boolean for a mutant to widen into a
+/// namespace-crossing `||` (the proven D-010 by-construction
+/// elimination). Pure.
+fn step_namespace(s: &crate::timeline::Step) -> Option<(crate::adapter::Provider, &str)> {
+    Some((s.provider?, s.assembled.as_ref()?.model.as_deref()?))
+}
+
 /// Byte-length floor below which a message is trivial role-glue, not an
 /// indictable block. A deterministic **byte** heuristic (not char/token),
 /// shared by the two block rules.
@@ -300,14 +311,15 @@ fn headroom(timeline: &Timeline, deep: bool) -> Option<Headroom> {
 
     // The per-turn assembled-token series, scoped to the SAME
     // (provider, model) namespace as the focus step. `prompt_tokens` is
-    // the F0-computed ±N% estimate already on every step.
+    // the F0-computed ±N% estimate already on every step. The namespace
+    // match is a single **tuple equality** (not a `provider && model`
+    // boolean) so there is no `&&` operator for a mutant to flip into a
+    // namespace-widening `||` (the proven D-010 by-construction
+    // technique); a mixed-namespace fixture pins the polarity.
     let series: Vec<usize> = timeline
         .steps
         .iter()
-        .filter(|s| {
-            s.provider == Some(provider)
-                && s.assembled.as_ref().and_then(|a| a.model.as_deref()) == Some(model.as_str())
-        })
+        .filter(|s| step_namespace(s) == Some((provider, model.as_str())))
         .map(|s| s.prompt_tokens)
         .collect();
     let turns = series.len();
@@ -1818,6 +1830,97 @@ mod tests {
             "a single turn has no measured slope ⇒ no C3 headroom, got {:?}",
             c.headroom
         );
+    }
+
+    #[test]
+    fn c3_step_namespace_is_exact_and_none_when_unknown() {
+        // Pure namespace helper: a single (provider, model) tuple or
+        // None. Pins that a step with no provider OR no model is in NO
+        // namespace (so a foreign step can never enter the C3 series).
+        let mut t = Timeline::new();
+        // Known provider + model ⇒ Some namespace.
+        t.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi there friend"}]}"#,
+        );
+        assert_eq!(
+            step_namespace(&t.steps[0]),
+            Some((
+                crate::adapter::Provider::Anthropic,
+                "claude-3-5-sonnet-20241022"
+            ))
+        );
+        // No provider (unrecognized path, no header) ⇒ None.
+        let mut u = Timeline::new();
+        u.record_request("POST", "/unknown/path", &[], br#"{"model":"gpt-4o"}"#);
+        assert_eq!(u.steps[0].provider, None);
+        assert_eq!(step_namespace(&u.steps[0]), None);
+        // Provider known but model absent ⇒ None (no fabricated id).
+        let mut v = Timeline::new();
+        v.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"messages":[{"role":"user","content":"no model field at all here"}]}"#,
+        );
+        assert_eq!(
+            v.steps[0].provider,
+            Some(crate::adapter::Provider::Anthropic)
+        );
+        assert_eq!(step_namespace(&v.steps[0]), None);
+    }
+
+    #[test]
+    fn c3_slope_is_scoped_to_the_focus_namespace_not_widened() {
+        // Mixed-namespace timeline: interleave a DIFFERENT (provider,
+        // model) between the focus model's turns. The C3 slope must be
+        // measured over the focus namespace's turns ONLY — a filter that
+        // widened across namespaces (an `&&`→`||`-class regression)
+        // would include the foreign step and corrupt turns/slope. This
+        // fixture makes that polarity observable (kills the missed
+        // pass-1 mutant by behaviour, complementing the by-construction
+        // tuple-equality elimination).
+        let mut t = Timeline::new();
+        let mk_anthropic = |n: usize| {
+            let msgs: Vec<String> = (0..n)
+                .map(|k| format!(r#"{{"role":"user","content":"anthropic turn body number {k} reasonably long"}}"#))
+                .collect();
+            format!(
+                r#"{{"model":"claude-3-5-sonnet-20241022","system":"s","messages":[{}]}}"#,
+                msgs.join(",")
+            )
+            .into_bytes()
+        };
+        // focus-namespace turn 1 (1 msg).
+        t.record_request("POST", "/v1/messages", &[], &mk_anthropic(1));
+        // a FOREIGN namespace step wedged in (different provider+model,
+        // huge prompt) — must NOT enter the focus series.
+        t.record_request(
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            br#"{"model":"gpt-4o","messages":[{"role":"user","content":"a totally unrelated and very different openai turn that is quite long indeed"}]}"#,
+        );
+        // focus-namespace turn 2 (3 msgs) — the focus (last parsed of
+        // the Anthropic namespace order) and the slope endpoint.
+        t.record_request("POST", "/v1/messages", &[], &mk_anthropic(3));
+
+        let h = compose(&t, false)
+            .headroom
+            .expect("focus = a known Anthropic model with 2 same-namespace turns");
+        assert_eq!(h.model, "claude-3-5-sonnet-20241022");
+        assert_eq!(h.window_tokens, 200_000);
+        // EXACTLY 2 turns counted (the 2 Anthropic turns), NOT 3 — the
+        // foreign gpt-4o step is excluded by the namespace filter.
+        assert_eq!(
+            h.turns, 2,
+            "the foreign-namespace step must NOT be in the C3 series"
+        );
+        // Growing within the focus namespace ⇒ a positive measured slope
+        // computed from the focus turns only.
+        assert!(h.slope_tokens_per_turn > 0);
     }
 
     #[test]
