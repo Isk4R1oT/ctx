@@ -570,3 +570,53 @@ async fn explicit_upstream_beats_the_key_registry() {
     );
     // `explicit` MockServer `.expect(1)` is verified on drop here.
 }
+
+// P3/D-017 — `--to <url>` is the most-explicit upstream (a discoverable
+// CLI flag, the D-001 amend): no env at all, beats the key registry.
+// On HEAD clap rejects `--to` (unknown arg) ⇒ non-zero ⇒ red.
+// `#[ignore]` keeps the gate green at the red commit; un-ignored at
+// the P3 impl commit.
+#[tokio::test]
+#[ignore = "P3/D-017 red: --to flag not yet added; un-ignored at the P3 impl commit"]
+async fn to_flag_is_the_explicit_upstream() {
+    let up = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"t"})))
+        .expect(1)
+        .mount(&up)
+        .await;
+
+    // A `sk-or-` key that WOULD infer OpenRouter — `--to` must win,
+    // with ZERO upstream env set.
+    let script = format!(
+        "curl -s -o /dev/null -X POST \"$OPENAI_BASE_URL/chat/completions\" \
+            -H 'content-type: application/json' \
+            -H 'authorization: Bearer sk-or-v1-localtest' -d '{OPENAI_BODY}'"
+    );
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_ctx"))
+        .args([
+            "run",
+            "--to",
+            &format!("{}/v1", up.uri()),
+            "--json",
+            "--",
+            "sh",
+            "-c",
+            &script,
+        ])
+        .env("NO_COLOR", "1")
+        .output()
+        .await
+        .expect("spawn ctx");
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let tl: Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let steps = tl["steps"].as_array().expect("steps");
+    assert_eq!(steps.len(), 1);
+    assert_eq!(
+        steps[0]["response"]["status"], 200,
+        "--to must be the verbatim explicit upstream (beats env + key registry)"
+    );
+    // `up` `.expect(1)` verified on drop ⇒ the request really hit it.
+}
