@@ -698,8 +698,10 @@ fn indict_request_replayed(timeline: &Timeline) -> Option<Indictment> {
     }
     // A replayed body = one that occurred in >=2 steps. `Vec::len` and
     // the std `filter` give the count; no hand-written comparison.
-    let replayed: Vec<(&&str, &Vec<&crate::timeline::Step>)> =
-        by_body.iter().filter(|(_, steps)| steps.len() >= 2).collect();
+    let replayed: Vec<(&&str, &Vec<&crate::timeline::Step>)> = by_body
+        .iter()
+        .filter(|(_, steps)| steps.len() >= 2)
+        .collect();
     if replayed.is_empty() {
         return None;
     }
@@ -707,9 +709,11 @@ fn indict_request_replayed(timeline: &Timeline) -> Option<Indictment> {
     // Total re-billed copies across all replayed bodies (each body's
     // `len() - 1` extra copies) and the matching token cost.
     let extra_copies = sat_sum(replayed.iter().map(|(_, steps)| steps.len() - 1));
-    let wasted = sat_sum(replayed.iter().map(|(body, steps)| {
-        replay_wasted(crate::tokenizer::count(body), steps.len() - 1)
-    }));
+    let wasted = sat_sum(
+        replayed
+            .iter()
+            .map(|(body, steps)| replay_wasted(crate::tokenizer::count(body), steps.len() - 1)),
+    );
     if wasted == 0 {
         return None; // no real re-billed prompt cost (degenerate body)
     }
@@ -1336,7 +1340,7 @@ mod tests {
         assert_eq!(drift_delta(0, 0), None); // empty == empty ⇒ stable
         assert_eq!(drift_delta(0, 1), Some(1)); // appeared/grew from 0
         assert_eq!(drift_delta(5, 9), Some(4)); // exact magnitude, not a flag
-        // saturating: no panic / wrap at the extreme either direction.
+                                                // saturating: no panic / wrap at the extreme either direction.
         assert_eq!(drift_delta(usize::MAX, 0), Some(usize::MAX));
         assert_eq!(drift_delta(0, usize::MAX), Some(usize::MAX));
     }
@@ -1577,7 +1581,7 @@ mod tests {
         assert_eq!(replay_wasted(100, 0), 0); // lone send ⇒ no extra copy
         assert_eq!(replay_wasted(7, 1), 7); // one re-bill = one copy (kills `*`→`-`: 7-1=6)
         assert_eq!(replay_wasted(7, 3), 21); // kills `*`→`+`(10) / `-`(4) / `/`(2) / `%`(1)
-        // saturating: an attacker `ctx open` body must not panic/wrap.
+                                             // saturating: an attacker `ctx open` body must not panic/wrap.
         assert_eq!(replay_wasted(usize::MAX, 2), usize::MAX);
         assert_eq!(replay_wasted(usize::MAX, 0), 0);
     }

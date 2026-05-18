@@ -77,9 +77,7 @@ fn magic_codec(body: &[u8]) -> Option<Codec> {
         // (not `<<`|`|`) so there is no shift/or operator for a mutant
         // to flip into an equivalent (`(b0<<8)|b1 == (b0<<8)^b1`).
         [b0, b1, ..]
-            if b0 & 0x0f == 0x08
-                && b0 & 0x80 == 0
-                && u16::from_be_bytes([*b0, *b1]) % 31 == 0 =>
+            if b0 & 0x0f == 0x08 && b0 & 0x80 == 0 && u16::from_be_bytes([*b0, *b1]) % 31 == 0 =>
         {
             Some(Codec::Zlib)
         }
@@ -300,7 +298,8 @@ mod tests {
     fn decode_roundtrips_gzip_and_zlib_by_magic() {
         // gzip (1f 8b) and zlib (CM=8 + %31) are header-independent —
         // recovered by content alone (the unheadered post-hoc path).
-        let payload = br#"{"model":"gpt","messages":[{"role":"user","content":"hello there now"}]}"#;
+        let payload =
+            br#"{"model":"gpt","messages":[{"role":"user","content":"hello there now"}]}"#;
         assert_eq!(&*decode_request_body(NOH, &gzip(payload)), payload);
         assert_eq!(&*decode_request_body(NOH, &zlib(payload)), payload);
     }
@@ -310,7 +309,11 @@ mod tests {
         // Real python-zstandard artifact (magic 28 b5 2f fd).
         let want = include_bytes!("../tests/fixtures/sample_payload.json");
         let zst = include_bytes!("../tests/fixtures/sample_zstd.bin");
-        assert_eq!(&zst[..4], &[0x28, 0xb5, 0x2f, 0xfd], "fixture must be real zstd");
+        assert_eq!(
+            &zst[..4],
+            &[0x28, 0xb5, 0x2f, 0xfd],
+            "fixture must be real zstd"
+        );
         assert_eq!(&*decode_request_body(NOH, zst), &want[..]);
     }
 
@@ -320,7 +323,11 @@ mod tests {
         // trigger it (proves the header-primary path; magic alone fails).
         let want = include_bytes!("../tests/fixtures/sample_payload.json");
         let br = include_bytes!("../tests/fixtures/sample_brotli.bin");
-        assert_eq!(&*decode_request_body(&hdr("br"), br), &want[..], "br via header");
+        assert_eq!(
+            &*decode_request_body(&hdr("br"), br),
+            &want[..],
+            "br via header"
+        );
         assert!(
             matches!(decode_request_body(NOH, br), Cow::Borrowed(_)),
             "brotli without the header is correctly NOT sniffed (honest Layer-2)"
@@ -364,7 +371,10 @@ mod tests {
         let mut bad = gzip(b"some real body bytes here");
         bad.truncate(bad.len() / 2);
         assert_eq!(&*decode_request_body(NOH, &bad), bad.as_slice());
-        assert_eq!(&*decode_request_body(&hdr("zstd"), b"\x28\xb5\x2f\xfdnope"), b"\x28\xb5\x2f\xfdnope");
+        assert_eq!(
+            &*decode_request_body(&hdr("zstd"), b"\x28\xb5\x2f\xfdnope"),
+            b"\x28\xb5\x2f\xfdnope"
+        );
         let fake = [0x1f, 0x8b, 0x00, 0x01, 0x02];
         assert_eq!(&*decode_request_body(NOH, &fake), &fake);
     }
@@ -383,7 +393,13 @@ mod tests {
     fn decode_tiny_inputs_are_borrowed_unchanged_no_panic() {
         // Sub-magic-length / partial inputs must be returned untouched
         // without panicking (slice patterns, no index OOB).
-        for b in [&b""[..], &b"{"[..], &[0x1f][..], &[0x1f, 0x8b][..], &[0x28, 0xb5][..]] {
+        for b in [
+            &b""[..],
+            &b"{"[..],
+            &[0x1f][..],
+            &[0x1f, 0x8b][..],
+            &[0x28, 0xb5][..],
+        ] {
             assert_eq!(&*decode_request_body(NOH, b), b, "tiny {b:?} verbatim");
         }
     }
@@ -396,7 +412,10 @@ mod tests {
         // attacker-`ctx open` decompression-bomb bound.
         let big = vec![b'a'; 4096];
         let gz = gzip(&big);
-        assert_eq!(decode_with_limit(NOH, &gz, 64), Cow::Borrowed(gz.as_slice()));
+        assert_eq!(
+            decode_with_limit(NOH, &gz, 64),
+            Cow::Borrowed(gz.as_slice())
+        );
         assert_eq!(&*decode_with_limit(NOH, &gz, 1 << 20), big.as_slice());
     }
 
