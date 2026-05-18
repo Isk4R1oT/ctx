@@ -67,10 +67,11 @@ pub async fn execute(command: &[String]) -> crate::Result<RunOutcome> {
     // Default carries `/v1`: ctx now injects the proxy ROOT (no
     // synthetic `/v1`), so the upstream base must hold the provider's
     // real path itself (D-017).
-    let openai_base = base_of(
-        &env_or(&["CTX_UPSTREAM_OPENAI", "OPENAI_BASE_URL", "OPENAI_API_BASE"]),
-        "https://api.openai.com/v1",
-    );
+    let openai_raw = env_or(&["CTX_UPSTREAM_OPENAI", "OPENAI_BASE_URL", "OPENAI_API_BASE"]);
+    // Explicit user upstream ⇒ authoritative; absent ⇒ the per-request
+    // key-prefix registry may infer it (P2/D-017).
+    let openai_explicit = !openai_raw.is_empty();
+    let openai_base = base_of(&openai_raw, "https://api.openai.com/v1");
 
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -86,6 +87,7 @@ pub async fn execute(command: &[String]) -> crate::Result<RunOutcome> {
         client,
         anthropic_base,
         openai_base,
+        openai_explicit,
         timeline: Arc::clone(&timeline),
     };
     let app = router(state);

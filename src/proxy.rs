@@ -49,7 +49,14 @@ pub struct ProxyState {
     pub anthropic_base: String,
     /// Full base URL of the real OpenAI-compatible upstream — path
     /// preserved (D-017); forward = this + the verbatim request path.
+    /// Used as-is when explicit; otherwise the per-request default the
+    /// key-prefix registry may override (P2).
     pub openai_base: String,
+    /// Whether `openai_base` came from an EXPLICIT user upstream
+    /// (`--to`/`--provider`/`CTX_UPSTREAM_*`/`*_BASE_URL`). Explicit ⇒
+    /// authoritative (no registry inference); not ⇒ infer per request
+    /// from the bearer-key prefix (P2/D-017).
+    pub openai_explicit: bool,
     pub timeline: Arc<Mutex<Timeline>>,
 }
 
@@ -120,9 +127,15 @@ async fn forward(state: ProxyState, req: Request) -> crate::Result<Response> {
         tl.record_request(method.as_str(), &path, &req_headers, &body_bytes)
     };
 
-    let base = match provider {
+    let base: &str = match provider {
         Some(Provider::Anthropic) => &state.anthropic_base,
-        Some(Provider::OpenAiCompat) | None => &state.openai_base,
+        // P2/D-017: explicit upstream wins; else infer from the
+        // bearer-key prefix; else the default (never a guess).
+        Some(Provider::OpenAiCompat) | None => crate::registry::resolve_openai_base(
+            state.openai_explicit,
+            &state.openai_base,
+            &req_headers,
+        ),
     };
     // Verbatim forward: full upstream base (path preserved, D-017) +
     // the client's request path exactly as sent to the proxy ROOT.

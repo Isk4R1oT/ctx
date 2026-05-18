@@ -18,22 +18,62 @@
 /// real path (D-017 verbatim-forward). Ordered MOST-SPECIFIC FIRST so
 /// `base_for_token` takes the longest matching prefix (`sk-or-` must
 /// win over the generic `sk-`).
-pub const REGISTRY: &[(&str, &str)] = &[];
+pub const REGISTRY: &[(&str, &str)] = &[
+    ("sk-ant-", "https://api.anthropic.com"),
+    ("sk-or-", "https://openrouter.ai/api/v1"),
+    ("gsk_", "https://api.groq.com/openai/v1"),
+    ("AIza", "https://generativelanguage.googleapis.com/v1beta/openai"),
+    // Generic OpenAI — LEAST specific, MUST stay last (longest-prefix).
+    ("sk-", "https://api.openai.com/v1"),
+];
 
 /// Longest (most-specific) registered prefix of `token` → its upstream
 /// base, else `None` (unknown ⇒ caller keeps its default, never a
-/// guess).
+/// guess). `REGISTRY` is ordered most-specific-first, so the first
+/// `starts_with` hit IS the longest prefix.
 #[must_use]
-pub fn base_for_token(_token: &str) -> Option<&'static str> {
-    None
+pub fn base_for_token(token: &str) -> Option<&'static str> {
+    REGISTRY
+        .iter()
+        .find(|(prefix, _)| token.starts_with(prefix))
+        .map(|(_, base)| *base)
 }
 
 /// Extract the bearer token from request headers (`Authorization:
-/// Bearer <token>`, header name case-insensitive). `None` if absent or
-/// not a bearer.
+/// Bearer <token>`, both the header name and the `Bearer` scheme
+/// case-insensitive; surrounding spaces trimmed). `None` if absent,
+/// not a bearer, or the token is empty (no meaningful key).
 #[must_use]
-pub fn bearer_token(_headers: &[(String, String)]) -> Option<&str> {
-    None
+pub fn bearer_token(headers: &[(String, String)]) -> Option<&str> {
+    let value = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        .map(|(_, v)| v.as_str())?;
+    let rest = value
+        .get(..7)
+        .filter(|p| p.eq_ignore_ascii_case("bearer "))
+        .map(|_| value[7..].trim())?;
+    (!rest.is_empty()).then_some(rest)
+}
+
+/// Choose the OpenAI-compatible upstream for one request. Precedence
+/// (P2/D-017): an EXPLICIT user upstream (`--to`/`--provider`/
+/// `CTX_UPSTREAM_*`/`*_BASE_URL`) ALWAYS wins; else infer from the
+/// request's bearer-key prefix; else the caller's default. Pure;
+/// the sole decision, isolated for exact-boundary mutation pinning.
+#[must_use]
+pub fn resolve_openai_base<'a>(
+    explicit: bool,
+    default_base: &'a str,
+    headers: &'a [(String, String)],
+) -> &'a str {
+    if explicit {
+        return default_base; // explicit upstream is authoritative
+    }
+    match bearer_token(headers).and_then(base_for_token) {
+        Some(inferred) => inferred,
+        None => default_base, // unknown ⇒ keep default, never a guess
+    }
 }
 
 #[cfg(test)]
@@ -45,7 +85,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "P2/D-017 red: registry stubs return None; un-ignored at the impl commit"]
     fn registry_is_nonempty_and_most_specific_first() {
         // Structural pin: a generic `sk-` entry (if present) must come
         // AFTER the specific `sk-…` ones so longest-prefix wins.
@@ -63,7 +102,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "P2/D-017 red: registry stubs return None; un-ignored at the impl commit"]
     fn base_for_token_longest_prefix_exact() {
         assert_eq!(
             base_for_token("sk-ant-api03-xxxx"),
@@ -93,7 +131,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "P2/D-017 red: registry stubs return None; un-ignored at the impl commit"]
     fn bearer_token_extraction_exact() {
         assert_eq!(
             bearer_token(&h("Authorization", "Bearer sk-or-v1-abc")),
@@ -111,5 +148,32 @@ mod tests {
         // absent ⇒ None
         assert_eq!(bearer_token(&h("X-Other", "Bearer sk-x")), None);
         assert_eq!(bearer_token(&[]), None);
+    }
+
+    #[test]
+    fn resolve_openai_base_precedence_exact() {
+        let or = h("Authorization", "Bearer sk-or-v1-x");
+        let unknown = h("Authorization", "Bearer xoxb-x");
+        let none: &[(String, String)] = &[];
+        // EXPLICIT always wins — even with a recognised key present.
+        assert_eq!(
+            resolve_openai_base(true, "https://my.gw/v1", &or),
+            "https://my.gw/v1"
+        );
+        // Not explicit + known key ⇒ inferred upstream (the P2 win).
+        assert_eq!(
+            resolve_openai_base(false, "https://api.openai.com/v1", &or),
+            "https://openrouter.ai/api/v1"
+        );
+        // Not explicit + unknown key ⇒ the default (never a guess).
+        assert_eq!(
+            resolve_openai_base(false, "https://api.openai.com/v1", &unknown),
+            "https://api.openai.com/v1"
+        );
+        // Not explicit + no auth ⇒ the default.
+        assert_eq!(
+            resolve_openai_base(false, "https://api.openai.com/v1", none),
+            "https://api.openai.com/v1"
+        );
     }
 }
