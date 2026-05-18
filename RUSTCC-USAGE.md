@@ -1030,3 +1030,22 @@ mechanism or any self-report.
 - `cargo deny`/`machete` ok (no new deps — registry is std-only).
   `/rust-review`+`/rust-harden` substituted in-thread (D-008). No
   false green.
+
+---
+
+## P3 / D-017 — --to/--provider flags (rust-cc, real e2e)
+
+- Red-first: `to_flag_is_the_explicit_upstream` ignored, PROVEN failing
+  on HEAD (clap rejects `--to`) (`a436287`); impl + un-ignore
+  (`8c5c3d2`).
+- Compiler-truth loop: `just check` RED on `clippy::single_match_else`
+  → `if let/else` per the lint → GREEN (`-D warnings` 0). `just test`
+  154/154 + doctests; zero regression (explicit-CTX/P1/P2 unchanged).
+- cargo-mutants `--in-diff` REAL baseline `ok 21s+6s`, 8 → 7 caught,
+  1 unviable, **0 missed** (clean first pass — std combinators +
+  exact-pinned registry/cli tests).
+- REAL e2e: env -u all upstream vars; `ctx run --provider openrouter
+  -- script` ⇒ live OpenRouter **HTTP 200** + F1 decomposes; unknown
+  `--provider` ⇒ clear error + exit 1 (verified no-pipe).
+- `cargo deny`/`machete` ok (no new deps). `/rust-review`+`/rust-harden`
+  substituted in-thread (D-008). No false green.

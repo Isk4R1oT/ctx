@@ -1335,3 +1335,31 @@ substituted in-thread (D-008 incident). No false green.
 
 **UX arc so far:** 3-part hack → P1 one env (`OPENAI_BASE_URL=…`) →
 P2 zero upstream config (the key auto-routes for known providers).
+
+### D-017 P3 — `--to` / `--provider` explicit-upstream flags DONE (the D-001 CLI amend)
+
+`Cmd::Run` += `--to <URL>` (verbatim explicit upstream, full path
+preserved) and `--provider <NAME>` (registry shortcut: openai|
+anthropic|openrouter|groq|google), clap `conflicts_with`.
+`run::execute(command, Option<&str> upstream)`. Precedence:
+`--to`/`--provider` > `CTX_UPSTREAM_*`/`*_BASE_URL` env > per-request
+key registry (P2) > default. Unknown `--provider` ⇒ a clear actionable
+`Error::Config` + **exit 1** (honest fail, never a guessed upstream;
+verified cleanly, no-pipe). Azure deliberately absent from `--provider`
+(resource-specific ⇒ `--to`). `registry::{PROVIDERS,base_for_provider}`
+(case-insensitive), exact-pinned.
+
+**Gates (real).** Red-first: `to_flag_is_the_explicit_upstream`
+`#[ignore]`'d, PROVEN failing on HEAD (clap rejects `--to`) (`a436287`);
+impl + un-ignore (`8c5c3d2`). `just check` clippy `-D warnings` 0 (loop
+caught a `single_match_else` nit → `if let`). `just test` **154/154,
+0 skipped** + doctests; explicit-CTX + P1/P2 integration tests
+unchanged ⇒ zero regression; cli parse + conflicts unit tests;
+`base_for_provider` exact-pinned. cargo-mutants `--in-diff`
+(cli+registry+lib+run): REAL baseline `ok 21s build + 6s test`,
+8 mutants → **7 caught, 1 unviable, 0 missed** (clean first pass).
+REAL e2e (green ≠ works): all upstream env UNSET +
+`ctx run --provider openrouter -- script` ⇒ live OpenRouter HTTP 200 +
+F1 decomposes (zero env, the most discoverable form, self-documented
+via `--help`). `/rust-review`+`/rust-harden` substituted in-thread
+(D-008). No false green.
