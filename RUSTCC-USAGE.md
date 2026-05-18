@@ -398,3 +398,267 @@
   (byte-prefix identity ≠ a provider-cache guarantee; ±N% tokenizer;
   shared-suffix gate is a deliberate true-positive bias / honest
   false-negative), and that evalint stays KILLED. No false green.
+
+---
+
+## C2 / D-011 — component-drift indictment (new pure-measurement F1 rule)
+
+- **TDD red-first (COMPILER-TRUTH Law 1/11).** Failing compose.rs
+  behavioral test written FIRST. Proven RED on worktree HEAD `0a07bd4`:
+  `cargo nextest run compose::` → `FAIL … component_drift_fires_only_
+  when_a_same_named_component_mutates`, panic `a mutated system block
+  across steps MUST be indicted`, while the other **16 compose tests
+  PASS** and the full 109 suite stays green (only this new test red).
+  `#[ignore]`-with-reason at test commit `719cc81` (commit-gate +
+  suite stay green: clippy 0, 109/109 1-skipped); un-ignored in impl
+  commit `e87c0ff`.
+- **Compiler-truth loop (Law 1/3/4/5).** PostToolUse `rustcc gate` =
+  the signal after every `.rs` edit. Red-test edit → `cargo clippy
+  --all-targets -- -D warnings` GREEN (the test only uses public
+  `compose`/`has_code`, so it compiles and fails at *runtime* — the
+  clean TDD red). Impl edit (`drift_delta` + `indict_component_drift`
+  + `indict()` wiring + un-ignore + boundary table) → `just check`
+  clippy `-D warnings` **0** first pass (no error class to fix — the
+  helper was isolated by construction). No hand-rolled cargo; the loop
+  was the oracle throughout. No borrow/lifetime/trait/move class arose
+  (read-only walk over `&Timeline`, no `.clone()`-to-silence, Law 10).
+- **`just test` 111/111, 0 skipped** + doctests (was 109; +2 = the
+  un-ignored behavioral test + `component_drift_decision_exact_
+  boundaries`). Tests ASSERT real values (Law 11): names the drifted
+  component, the step index, a non-zero token delta, and pins the
+  renamed-tool=remove+add / single-step / stable-is-silent negatives.
+- **`just harden`.** `cargo deny` advisories/bans/licenses/sources
+  **ok**; `cargo machete` **no unused deps** — C2 added ZERO new deps
+  (stdlib `BTreeMap` + existing tokenizer). `cargo semver-checks` flags
+  the pre-existing crates.io `ctx` NAME COLLISION (PROJECT.md §11
+  pre-publish rename gate) — non-fatal in the justfile (`|| true`),
+  unrelated to C2.
+- **Mutation-hardening — 2 independent REAL non-vacuous baselines
+  (Law 11).** `cargo mutants --in-diff /tmp/c2.diff --test-tool
+  nextest --timeout 120`:
+  - Run 1: baseline `ok 71s build + 29s test` (REAL — not vacuous,
+    not timed-out), 10 mutants → **8 caught, 2 unviable, 0 MISSED**.
+  - Run 2: baseline `ok 41s build + 15s test` (REAL), 10 mutants →
+    **8 caught, 2 unviable, 0 MISSED** (stable across passes).
+  - 0 missed on pass 1 **by construction**: the decision was isolated
+    in the pure `drift_delta(prev,cur)` helper (ONE `==` + ONE
+    saturating abs-diff) with an exact-boundary unit table FROM THE
+    START (the D-010 technique applied preemptively) — so unlike D-010
+    (8 missed → restructure) no 2-pass restructuring was needed and
+    there is no equivalent mutant to eliminate. The 2 unviable are
+    non-compiling `Some(Default::default())` / `vec![Default::
+    default()]` substitutions (`Indictment`/`Vec` have no `Default`
+    there) — correctly unviable, NOT equivalent-and-missed.
+- **Real e2e (green ≠ works).** `cargo build` → `target/debug/ctx`.
+  A real 2-turn python `httpx` client via `ctx run --save` (dummy
+  `Authorization: Bearer test`, natural `/v1/chat/completions`;
+  upstream 404/conn-refused IGNORED — F0 captures the request BEFORE
+  forward; $0, no real key anywhere):
+  - **MODE=drift** (turn 2 mutates the system prompt, same
+    provider+model) ⇒ FIRES: `waste component-drift wasted_tokens=1
+    1 same-named component(s) mutated mid-session: system@step 1
+    (~1 tok changed; a renamed tool reads as remove+add, not drift)`.
+    Round-trips post-hoc via `ctx open /tmp/c2_drift.db` (same line).
+  - **MODE=stable** (byte-identical system on turn 2) ⇒ correctly
+    SILENT: only `preamble-repay`/`unused-loaded-tools` (C2 is
+    preamble-repay's OPPOSITE). Also silent post-hoc via `ctx open`.
+- **Pure measurement / evalint KILLED.** Only `==`/`!=`, `max/min`,
+  `saturating_sub`, the existing labeled ±N% tokenizer, `sat_sum`. No
+  judge, no prediction, no "model will forget X". No `Assembled` shape
+  change (reads only the existing `system` + named `tools`). `/rust-
+  review` not invocable in-thread ⇒ in-thread tool-grounded self-
+  review (pure / total / panic-free / deterministic `BTreeMap` /
+  no-`Assembled`-change / renamed=remove+add), deliberately NOT
+  subagent-delegated (D-008 incident). Substitution, not an
+  independent SHIP. No false green. Honest limit recorded in D-011:
+  tool drift is at `schema_tokens` granularity (a same-token-count
+  schema mutation is a deliberate honest false-negative — `Assembled`
+  carries no per-tool raw bytes and changing it is the goal HALT
+  condition); `system` drift is byte-exact.
+
+---
+
+## (relocated) C6/D-013 — was mis-filed in docs/RUSTCC-USAGE.md during parallel dev
+
+# RUSTCC-USAGE.md — rust-cc compiler-truth artifacts
+
+> Per-feature record of the rust-cc compiler-truth loop (COMPILER-TRUTH.md,
+> 12 laws) with concrete artifacts. No artifact ⇒ HALT. The PostToolUse
+> `rustcc` digest is the signal; `just check`/`just test` are the gates;
+> `cargo mutants --in-diff` proves the tests assert (Law 11).
+
+---
+
+## C6 / D-013 — `request-replayed` (same-body retry-replay F1 indictment)
+
+Isolated worktree branch `worktree-agent-a8666b7b81bf44e78`. C6 works on
+`step.request.body` / `step.response` only — `adapter.rs::Assembled` was
+NOT touched (HALT condition checked and not triggered; the data the rule
+needs — verbatim body + buffered response status — is already on `Step`).
+
+### Loop discipline (Laws 1–8)
+
+- **TDD red-first (Law 11 + the goal's red-first mandate).** Three C6
+  tests added to `compose.rs` BEFORE any implementation. Proven RED on
+  worktree HEAD `410c790`:
+  `cargo nextest run -E 'test(request_replayed)'` →
+  `2 failed, 1 passed` (the two "fires" tests fail with
+  *"a byte-identical re-send MUST be indicted as request-replayed"*; the
+  control "silent" test passes — correctly nothing fires yet). The rest
+  of the suite proven still green at the red HEAD:
+  `cargo nextest run -E 'not test(request_replayed)'` → **109/109**.
+  Red-first committed as `410c790` before the feature commit.
+- **Law 1 (no claim without a tool) / Law 3–4 (one root class).** Every
+  `.rs` edit ran the `rustcc` PostToolUse gate (`cargo check`). The C6
+  implementation compiled clean on the first `cargo check` (no error
+  cascade; no borrow/lifetime/trait/move family → no `borrow-checker-
+  surgeon` needed, no `/rust-fix` iteration needed). Recorded artifact:
+  `cargo check` → `Finished dev profile … in 13.37s`, no diagnostics.
+- **Law 2 (no memorized crate APIs).** No new crates (`/rust-deps` not
+  required). C6 reuses `crate::tokenizer::count`, `std::collections::
+  BTreeMap`, and std iterator combinators (`filter`, `max_by_key`) — all
+  already in use in `compose.rs`; APIs are compiler-verified, not
+  recalled.
+- **Law 5 (never commit over red) / Law 8 (not done while red).**
+  `just check` (`cargo clippy --all-targets -- -D warnings`) → clean,
+  0 warnings. `just test` → `cargo nextest run` **113/113** + doctests
+  `ok`. Commit-gate never bypassed; two atomic commits
+  (`test(C6/D-013)` red-first, `feat(C6/D-013)` impl) each on a green
+  build.
+- **Law 9 (no unwrap/expect in non-test code).** `indict_request_replayed`
+  / `replay_wasted` use `?`-free total combinators, `map_or_else` for the
+  status fallback, and `sat_sum` (saturating) for all arithmetic — no
+  `unwrap`/`expect`/panic path on attacker-influenced `ctx open` bytes.
+  `unwrap` appears only in `#[cfg(test)]`.
+- **Law 10 (no clone to dodge borrow).** No `.clone()` added; the rule
+  borrows `&timeline.steps` and keys a `BTreeMap<&str, Vec<&Step>>` by
+  reference.
+
+### Real verification (green ≠ works) — `ctx run` / `ctx open`
+
+Real local python httpx clients (no real key; DUMMY `Authorization:
+Bearer test`; natural `/v1/chat/completions` path; upstream deliberately
+fails — F0 captures the request BEFORE forwarding; $0):
+
+- **Fires (replay).** `/tmp/c6_replay_client.py` POSTs the SAME body
+  twice (a real retry-after-failure shape).
+  `ctx run --save /tmp/c6.db -- python3 …` →
+  `waste request-replayed wasted_tokens=60 1 request body re-send(s)
+  across 1 distinct body/ies, re-billed verbatim; replayed attempt
+  status not captured` (upstream unreachable ⇒ no buffered response ⇒
+  the honest "status not captured" fallback, NOT a fabricated status).
+- **Silent (control).** `/tmp/c6_control_client.py` POSTs two DIFFERENT
+  bodies. `ctx run` → only `preamble-repay`; **no `request-replayed`**
+  (proves whole-body byte-equality, not similarity).
+- **Post-hoc round-trip.** `ctx open /tmp/c6.db` and
+  `ctx open /tmp/c6.db --json` both re-emit the `request-replayed`
+  indictment (`wasted_tokens: 60`) through the SQLite save/load — F0
+  contract intact, `--json` CI contract carries it.
+- **Buffered-status annotation (real 529).** A local upstream returning
+  529 (`/tmp/c6_upstream_529.py`) makes the proxy buffer a real
+  response; the replay run then reports
+  `… re-billed verbatim; first replayed attempt returned 529` —
+  exactly the research §c shape ("step 5 == step 4 body; step 4
+  returned 529"), sourced from F0's already-buffered response.
+
+### Mutation-hardening (Law 11) — `cargo mutants --in-diff`
+
+Proactive D-010 technique applied BY CONSTRUCTION before the first run:
+the cost decision is isolated in the pure `replay_wasted(body_tokens,
+extra_copies)` helper with an exact-boundary unit table
+(`replay_wasted_exact_boundaries`) the approximate tokenizer cannot reach
+through `compose()`; the replay detection uses std `filter(len() >= 2)` /
+`max_by_key` / `sat_sum` (no hand-written `<`/`||`/compound boolean for a
+mutant to flip); empty-body (`!is_empty`) and `wasted == 0` guards remove
+degenerate cases.
+
+- **Pass 1** (`/tmp/c6_src.diff`, `--test-tool nextest --timeout 120`):
+  **Found 13 mutants; 11 caught, 2 unviable, 0 MISSED** on a REAL
+  baseline — `Unmutated baseline ok 31s build + 8s test` (explicitly
+  non-vacuous, not timed-out; the integrity bar the D-008 incident set).
+  The 2 unviable are the `Default::default()` return-replacement arms
+  (do not compile — genuinely unviable, not skipped). Caught mutants
+  cover every load-bearing site: `replay_wasted → 0 / 1`,
+  `indict_request_replayed → None`, `delete !` on the empty-body filter,
+  `>= → <` on the replay threshold, `- → + / /` on both
+  `len() - 1` sites, `== → !=` on the `wasted == 0` guard, and the
+  `indict()` registration.
+- **Pass 2** (confirming, fresh `mutants.out`): **13 mutants; 11
+  caught, 2 unviable, 0 MISSED** on a fresh REAL baseline —
+  `Unmutated baseline ok 40s build + 14s test` (independent build, not
+  a reused cache; non-vacuous). Identical result to pass 1 ⇒ the C6
+  test suite genuinely pins the behaviour (Law 11 satisfied; no
+  equivalent-mutant hand-waving — every mutated operator is either
+  caught or structurally unviable).
+
+`/rust-review` + `/rust-harden` skills are not invocable inside this
+agent thread; substituted by an in-thread tool-grounded self-review
+(pure / total / panic-free / saturating / byte-equality-only / no
+`guard`-style intervention) — deliberately NOT subagent-delegated (the
+D-008 review-subagent integrity incident). Recorded as a substitution,
+not an independent SHIP.
+
+---
+
+
+---
+
+## C3 / D-012 — context-window headroom & growth-rate slope (new pure-measurement signal)
+
+- TDD red-first: the `c3_*` compose tests were written FIRST and proven
+  to **fail to compile on the worktree HEAD** (`error[E0609]: no field
+  'headroom' on type 'Composition'`, ×7) with the rest of the suite
+  green (109 nextest + 91 lib) — recorded before any impl.
+- New module `src/window.rs`: a static offline context-window registry
+  (PROJECT.md §8 seam), pure data + a pure longest-substring lookup,
+  honest `WINDOW_LABEL` (the C3 analogue of the tokenizer ±N% label).
+  Every table entry exact-value pinned; unknown id ⇒ `None` (no guess).
+- Compiler-truth loop (`just check`, clippy `-D warnings` incl.
+  pedantic) — the PostToolUse `rustcc gate` ran `cargo check` after
+  each `.rs` edit; the digest named, fixed root-cause-first one class
+  at a time: `too_many_lines` (extracted `render::headroom_tty`),
+  `cast u128→u32 may truncate` + `useless_conversion` (replaced a lossy
+  test cast with the exact `pct()` equality). Re-checked green.
+- `just test` after impl: **129 nextest + 100 lib** + doctests, 0
+  skipped — purely additive, zero regression (all F0/F1/F2/F3 + decode
+  + C1 stay green; the only existing-snapshot change is the additive
+  `"headroom": null` on the unknown-model `f1_fixture`, manually
+  applied — `steps` stays top-level, D-005 intact).
+- REAL e2e (green ≠ works): a real python-httpx **multi-turn growing**
+  conversation through `ctx run --save /tmp/c3.db` (DUMMY
+  `Authorization: Bearer test`; natural `/v1/chat/completions` 404s
+  upstream; request captured BEFORE forward; $0; no real key).
+  - `ctx open` headline: `window gpt-4o 561/128000 tok 0% slope 146
+    tok/turn over 4 turn(s) (...approximate...)` — fraction + slope,
+    **no projection**.
+  - `ctx --deep open`: adds exactly `window-projection at the observed
+    mean rate (~146 tok/turn over 4 turn(s)), ~872 more turn(s) before
+    the 128000-tok window is reached (neutral arithmetic projection,
+    not a prediction)` — neutral, never "will overflow/truncate".
+  - A single-turn known-model session AND an unknown-model
+    (`llama-3-70b`) session each emit **zero** window claims even with
+    `--deep` (both gates honest & independent).
+  - `--json` keeps `steps` top-level; `headroom` integer-only
+    (`used_pct`/`slope`), `projection` null without `--deep`.
+- cargo-mutants `--in-diff` on the C3 surface, REAL non-vacuous
+  baselines:
+  - Run 1: baseline `ok 25s build + 8s test`, 28 mutants → **1
+    MISSED** (`replace && with || in headroom` — the `provider &&
+    model` series filter; single-namespace fixtures made `&&`≡`||`).
+    NOT accepted. Eliminated **BY CONSTRUCTION**: the namespace match
+    is now a single `(provider, model)` **tuple equality** via the
+    pure `step_namespace` helper (no `&&` operator remains to widen
+    into a namespace-crossing `||`) + a discriminating mixed-namespace
+    fixture (foreign `gpt-4o` step wedged between focus Anthropic
+    turns; pins `turns == 2`) + exact `step_namespace` pins.
+  - Run 2: baseline `ok 31s build + 14s test`, 29 mutants → **25
+    caught, 4 unviable, 0 MISSED**.
+- Pure measurement only: fraction = `floor(used*100/window)` (the
+  `pct` discipline), slope = exact integer `(last−first)/(turns−1)` on
+  the labeled ±N% series; the projection is pure division, `--deep`-
+  only, neutrally worded. No prediction of fate (evalint stays
+  KILLED). `cargo deny`/`machete` ok (no new deps; `window.rs` = pure
+  data + std). `/rust-review`/`/rust-harden` not invocable in-thread →
+  substituted by the tool-grounded compiler-truth loop + 2-pass real
+  cargo-mutants; deliberately NOT subagent-delegated (D-008 incident).
+  Recorded as a substitution, not an independent SHIP. No false green.

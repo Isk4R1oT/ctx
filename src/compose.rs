@@ -36,6 +36,40 @@ pub struct Indictment {
     pub wasted_tokens: usize,
 }
 
+/// C3 (D-012) — context-window headroom & growth-rate slope. PURE
+/// MEASUREMENT: a fraction of the model's window (the labeled offline
+/// table) plus the measured tokens/turn slope (arithmetic on the
+/// labeled ±N% token series). It asserts NOTHING about overflow or
+/// truncation (that would be evalint — EXCLUDED). The only contestable
+/// part — a *projection* of turns until the window is reached — is a
+/// NEUTRAL arithmetic, `--deep`-only, worded "at the observed mean
+/// rate", never as fate. `None` when the model id is not in the table
+/// (no window claim) or the session has < 2 turns (no measured slope).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Headroom {
+    /// The wire model id this window size was resolved for.
+    pub model: String,
+    /// Context-window budget from the static offline table (labeled
+    /// approximation — `window::WINDOW_LABEL`, like the tokenizer ±N%).
+    pub window_tokens: usize,
+    /// Focus step's assembled prompt tokens (the ±N% token estimate).
+    pub used_tokens: usize,
+    /// `used_tokens / window_tokens` as an integer percent (floored) —
+    /// no float, snapshot-stable (mirrors `Component::pct`).
+    pub used_pct: u32,
+    /// Number of same-(provider,model) turns the slope was measured over.
+    pub turns: usize,
+    /// Measured mean growth of the assembled prompt, tokens/turn:
+    /// `(last - first) / (turns - 1)`. Signed (a shrinking session is a
+    /// real measured negative slope, never clamped to a guess).
+    pub slope_tokens_per_turn: i64,
+    /// `--deep`-ONLY neutral arithmetic projection ("at the observed
+    /// mean rate, ~N more turn(s) before the window is reached"). `None`
+    /// in the headline and whenever the slope is non-positive (a flat or
+    /// shrinking session has no honest "turns remaining" arithmetic).
+    pub projection: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Composition {
     /// The step whose breakdown is shown (last step with a parsed prompt).
@@ -45,6 +79,9 @@ pub struct Composition {
     /// Per-tool token detail — only populated when `--deep`.
     pub tools_deep: Vec<Component>,
     pub indictments: Vec<Indictment>,
+    /// C3 (D-012) context-window headroom & slope. Additive (preserves
+    /// the D-005 `--json` contract); `None` ⇒ no window claim / no slope.
+    pub headroom: Option<Headroom>,
 }
 
 fn pct(part: usize, total: usize) -> u32 {
@@ -52,6 +89,59 @@ fn pct(part: usize, total: usize) -> u32 {
         .checked_div(total)
         .and_then(|v| u32::try_from(v).ok())
         .unwrap_or(0)
+}
+
+/// C3 (D-012) — measured mean growth of the assembled prompt across a
+/// same-(provider,model) session, in tokens/turn: `(last - first) /
+/// (turns - 1)`. PURE ARITHMETIC on the already-counted ±N% token
+/// series. Signed `i64`: a shrinking session is a real negative slope,
+/// never clamped (clamping would fabricate a measurement). `None` for
+/// < 2 turns (no two points ⇒ no measurable rate). Truncating integer
+/// division is intentional and snapshot-stable (no float in the
+/// contract, mirrors the `pct` integer discipline). Extracted as a pure
+/// helper with exact-value unit pins (the proven D-010 technique — the
+/// approximate tokenizer cannot hit these boundaries through `compose`).
+fn slope_per_turn(first_tok: usize, last_tok: usize, turns: usize) -> Option<i64> {
+    let span = turns.checked_sub(1)?;
+    if span == 0 {
+        return None; // a single turn has no measurable growth rate
+    }
+    let first = i64::try_from(first_tok).ok()?;
+    let last = i64::try_from(last_tok).ok()?;
+    let span = i64::try_from(span).ok()?;
+    Some((last - first) / span)
+}
+
+/// C3 (D-012) — the NEUTRAL `--deep` arithmetic projection: at the
+/// measured mean rate, how many further turns of the same growth before
+/// the window budget is reached. PURE ARITHMETIC, phrased as a
+/// mean-rate extrapolation, NEVER asserted as fate (no "will overflow /
+/// will truncate" — that is evalint, EXCLUDED). `None` unless the slope
+/// is strictly positive and there is remaining budget (a flat /
+/// shrinking / already-over session has no honest "turns remaining"
+/// arithmetic — say nothing rather than fabricate one).
+fn turns_until_window(used_tok: usize, window_tok: usize, slope: i64) -> Option<usize> {
+    if slope <= 0 {
+        return None; // not growing ⇒ no honest "turns remaining" figure
+    }
+    let slope = usize::try_from(slope).ok()?;
+    let remaining = window_tok.checked_sub(used_tok)?;
+    if remaining == 0 {
+        return None; // already at/over the window ⇒ no positive headroom
+    }
+    // Ceil-free floor division: whole turns of headroom at the mean rate.
+    Some(remaining / slope)
+}
+
+/// C3 (D-012) — a step's cache/budget **namespace**: `(provider,
+/// model)`, or `None` when either is unknown (an unparsed/unknown step
+/// is not in any namespace, never a guess). Returned as ONE tuple so the
+/// `headroom` series filter is a single tuple equality — there is no
+/// `provider && model` boolean for a mutant to widen into a
+/// namespace-crossing `||` (the proven D-010 by-construction
+/// elimination). Pure.
+fn step_namespace(s: &crate::timeline::Step) -> Option<(crate::adapter::Provider, &str)> {
+    Some((s.provider?, s.assembled.as_ref()?.model.as_deref()?))
 }
 
 /// Byte-length floor below which a message is trivial role-glue, not an
@@ -194,7 +284,77 @@ pub fn compose(timeline: &Timeline, deep: bool) -> Composition {
         components,
         tools_deep,
         indictments: indict(timeline),
+        headroom: headroom(timeline, deep),
     }
+}
+
+/// C3 (D-012) — context-window headroom & growth-rate slope. PURE
+/// MEASUREMENT. The window comes from the static offline table keyed by
+/// the focus step's wire model id (`window::window_for`); an unknown id
+/// ⇒ `None` (NO window claim — skipped honestly, never guessed). The
+/// slope is the measured mean tokens/turn across the **same
+/// (provider, model)** turns (a different model is a different budget,
+/// so its turns are not in this series). The `--deep`-ONLY projection is
+/// a neutral mean-rate arithmetic, never asserted as fate.
+fn headroom(timeline: &Timeline, deep: bool) -> Option<Headroom> {
+    // Focus = the last structurally-parsed step (same as `compose`'s
+    // headline focus). C3 has no honest meaning on a Layer-2 raw body
+    // (no model id, no per-turn series) — skip rather than fabricate.
+    let focus = timeline
+        .steps
+        .iter()
+        .rev()
+        .find(|s| s.assembled.is_some())?;
+    let provider = focus.provider?;
+    let model = focus.assembled.as_ref()?.model.as_deref()?.to_owned();
+    let window_tokens = crate::window::window_for(&model)?;
+
+    // The per-turn assembled-token series, scoped to the SAME
+    // (provider, model) namespace as the focus step. `prompt_tokens` is
+    // the F0-computed ±N% estimate already on every step. The namespace
+    // match is a single **tuple equality** (not a `provider && model`
+    // boolean) so there is no `&&` operator for a mutant to flip into a
+    // namespace-widening `||` (the proven D-010 by-construction
+    // technique); a mixed-namespace fixture pins the polarity.
+    let series: Vec<usize> = timeline
+        .steps
+        .iter()
+        .filter(|s| step_namespace(s) == Some((provider, model.as_str())))
+        .map(|s| s.prompt_tokens)
+        .collect();
+    let turns = series.len();
+    let first = *series.first()?;
+    let last = *series.last()?;
+    // The measured slope needs >=2 turns; < 2 ⇒ no measurable rate ⇒
+    // skip the whole C3 claim honestly (no slope, no headline).
+    let slope_tokens_per_turn = slope_per_turn(first, last, turns)?;
+
+    let used_tokens = focus.prompt_tokens;
+    let used_pct = pct(used_tokens, window_tokens);
+
+    // `--deep` ONLY: the neutral arithmetic projection. Worded as a
+    // mean-rate extrapolation, NEVER as fate (no "will overflow /
+    // truncate" — evalint, EXCLUDED). Absent in the headline and when
+    // the slope is non-positive (no honest "turns remaining" arithmetic).
+    let projection = if deep {
+        turns_until_window(used_tokens, window_tokens, slope_tokens_per_turn).map(|n| {
+            format!(
+                "at the observed mean rate (~{slope_tokens_per_turn} tok/turn over {turns} turn(s)), ~{n} more turn(s) before the {window_tokens}-tok window is reached (neutral arithmetic projection, not a prediction)"
+            )
+        })
+    } else {
+        None
+    };
+
+    Some(Headroom {
+        model,
+        window_tokens,
+        used_tokens,
+        used_pct,
+        turns,
+        slope_tokens_per_turn,
+        projection,
+    })
 }
 
 /// All indictments — each rule is its own pure-measurement helper.
@@ -206,6 +366,8 @@ fn indict(timeline: &Timeline) -> Vec<Indictment> {
         indict_unpruned_history(timeline),
         indict_preamble_repay(timeline),
         indict_cache_prefix_break(timeline),
+        indict_request_replayed(timeline),
+        indict_component_drift(timeline),
     ]
     .into_iter()
     .flatten()
@@ -494,6 +656,187 @@ fn indict_preamble_repay(timeline: &Timeline) -> Option<Indictment> {
             repaid.len()
         ),
         wasted_tokens: wasted,
+    })
+}
+
+/// C6 (D-013) — same-body re-send / retry-replay. PURE MEASUREMENT: the
+/// re-billed token cost of a body sent verbatim more than once, given its
+/// per-copy token count and how many times it occurred. `extra_copies` =
+/// `occurrences - 1` is computed by the caller from a count map (no hand
+/// comparison for a mutant to flip); this is the cost arithmetic only,
+/// kept pure + saturating + isolated so the approximate tokenizer cannot
+/// reach this boundary through `compose()` (the proven D-010 technique).
+/// `0` means "no re-billed cost" (a lone send, or empty body) and the
+/// caller drops it — it is NEVER an indictment.
+fn replay_wasted(body_tokens: usize, extra_copies: usize) -> usize {
+    body_tokens.saturating_mul(extra_copies)
+}
+
+/// C6 (D-013) — `request-replayed`. A retry after a 429/5xx or an
+/// idempotent re-issue emitted by an HTTP/framework layer *below* the
+/// user's code re-sends the SAME assembled prompt verbatim; only the
+/// wire shows it and only a cross-step holder can detect the duplicate.
+/// Whole-body sibling of `repeated-block-across-turns` (that is a message
+/// block repeated across turns; this is the ENTIRE request body re-sent —
+/// a distinct waste class). Strictly PURE MEASUREMENT: full-body
+/// byte-equality + occurrence count + the re-billed token weight + the
+/// ALREADY-BUFFERED response status of the replayed attempt (F0 buffers
+/// responses; request-only for the core fact). It BORDERS `guard`'s
+/// territory — `ctx` only REPORTS the fact; it NEVER throttles /
+/// circuit-breaks / intervenes (that is `guard`; EXCLUDED, research §c/d).
+fn indict_request_replayed(timeline: &Timeline) -> Option<Indictment> {
+    // Group steps by verbatim request body. Empty bodies carry no
+    // re-billed prompt cost (role-glue / a non-prompt POST) — excluded
+    // by the `is_empty` filter, mirroring the MIN_BLOCK_BYTES discipline
+    // of the block rules.
+    let mut by_body: std::collections::BTreeMap<&str, Vec<&crate::timeline::Step>> =
+        std::collections::BTreeMap::new();
+    for s in &timeline.steps {
+        if !s.request.body.is_empty() {
+            by_body.entry(s.request.body.as_str()).or_default().push(s);
+        }
+    }
+    // A replayed body = one that occurred in >=2 steps. `Vec::len` and
+    // the std `filter` give the count; no hand-written comparison.
+    let replayed: Vec<(&&str, &Vec<&crate::timeline::Step>)> = by_body
+        .iter()
+        .filter(|(_, steps)| steps.len() >= 2)
+        .collect();
+    if replayed.is_empty() {
+        return None;
+    }
+    let distinct = replayed.len();
+    // Total re-billed copies across all replayed bodies (each body's
+    // `len() - 1` extra copies) and the matching token cost.
+    let extra_copies = sat_sum(replayed.iter().map(|(_, steps)| steps.len() - 1));
+    let wasted = sat_sum(
+        replayed
+            .iter()
+            .map(|(body, steps)| replay_wasted(crate::tokenizer::count(body), steps.len() - 1)),
+    );
+    if wasted == 0 {
+        return None; // no real re-billed prompt cost (degenerate body)
+    }
+    // Annotate the buffered status of the *replayed* attempt: the
+    // most-replayed body's FIRST occurrence (the attempt that was retried
+    // — research §c: "step 5 == step 4 body; step 4 returned 529"). std
+    // `max_by_key` — no hand comparison for a mutant to flip.
+    let worst = replayed
+        .iter()
+        .max_by_key(|(_, steps)| steps.len())
+        .map(|(_, steps)| *steps);
+    let status_note = worst
+        .and_then(|steps| steps.first())
+        .and_then(|first| first.response.as_ref())
+        .map_or_else(
+            || "; replayed attempt status not captured".to_string(),
+            |r| format!("; first replayed attempt returned {}", r.status),
+        );
+    Some(Indictment {
+        code: "request-replayed".to_string(),
+        detail: format!(
+            "{extra_copies} request body re-send(s) across {distinct} distinct body/ies, re-billed verbatim{status_note}"
+        ),
+        wasted_tokens: wasted,
+    })
+}
+
+/// C2 (D-011) — the pure per-appearance decision for ONE component:
+/// given the previous and current *size* of a same-named component, the
+/// drift magnitude iff it changed, else `None`. ONE equality + ONE
+/// absolute difference, isolated here so the only comparison/arithmetic
+/// is unit-pinnable at its exact boundary — the approximate tokenizer
+/// cannot reach these values through `compose()` (the D-010 technique).
+/// Pure measurement: integer (in)equality, no judgment.
+fn drift_delta(prev: usize, cur: usize) -> Option<usize> {
+    if prev == cur {
+        return None; // byte/size-identical re-payment ⇒ NOT drift
+    }
+    // Saturating abs-difference: waste math runs on attacker-influenced
+    // wire bytes (`ctx open` reads an unbounded saved session); it must
+    // never panic in debug nor wrap in release (the `sat_sum`/`pct`
+    // discipline). `prev != cur` here, so the result is always >= 1.
+    Some(prev.max(cur).saturating_sub(prev.min(cur)))
+}
+
+/// C2 (D-011) — component-drift. The OPPOSITE of `preamble-repay`: that
+/// counts an *identical* component re-paid; this catches a same-NAMED
+/// component (`system`, or a tool keyed by its name) whose bytes/size
+/// silently **mutate** between two of its appearances mid-session — the
+/// #1 cause of both cache invalidation and a "stable" instruction
+/// changing under the engineer's feet. Strictly PURE MEASUREMENT:
+/// per-component cross-step (in)equality + byte/token deltas + the step
+/// index; NO prediction, NO "the model will forget X" (evalint KILLED).
+///
+/// Component identity is keyed by NAME. `system` fingerprints on its
+/// exact bytes (so the byte delta is exact AND the token delta is the
+/// labeled ±N% estimate). Each tool fingerprints on the size the
+/// canonical `Assembled` view exposes (`schema_tokens`) — the byte
+/// granularity is not carried by `Assembled` and is NOT re-derived here
+/// (that would duplicate the adapter / require an `Assembled` shape
+/// change — explicitly out of scope, D-001/D-007/D-008); a same-token-
+/// count schema mutation is therefore a deliberate honest false-negative
+/// (the D-010 true-positive-bias discipline). A renamed tool is a
+/// different key ⇒ remove+add, never a drift event — stated, not
+/// inferred (per the C2 spec caveat).
+fn indict_component_drift(timeline: &Timeline) -> Option<Indictment> {
+    // Per component key → its size at the previous appearance. `system`
+    // also keeps the previous bytes so the byte delta is exact.
+    let mut prev_tool: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut prev_sys: Option<(usize, String)> = None;
+    // Distinct components that drifted, each pinned to the FIRST step
+    // index where it changed (a BTreeMap ⇒ deterministic ordering).
+    let mut first_drift: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    let mut deltas: Vec<usize> = Vec::new();
+
+    for s in &timeline.steps {
+        let Some(a) = &s.assembled else { continue };
+        // system — exact-byte fingerprint (only when present & non-empty,
+        // matching `preamble-repay`'s "a system block exists" gate).
+        if let Some(sys) = a.system.as_deref().filter(|x| !x.is_empty()) {
+            let cur = crate::tokenizer::count(sys);
+            if let Some((prev_tok, prev_bytes)) = prev_sys.as_ref() {
+                if prev_bytes != sys {
+                    if let Some(d) = drift_delta(*prev_tok, cur) {
+                        first_drift.entry("system".to_string()).or_insert(s.index);
+                        deltas.push(d);
+                    }
+                }
+            }
+            prev_sys = Some((cur, sys.to_string()));
+        }
+        // each tool, keyed by name — size fingerprint (`schema_tokens`).
+        for t in &a.tools {
+            let key = format!("tool:{}", t.name);
+            if let Some(prev) = prev_tool.get(&key) {
+                if let Some(d) = drift_delta(*prev, t.schema_tokens) {
+                    first_drift.entry(key.clone()).or_insert(s.index);
+                    deltas.push(d);
+                }
+            }
+            prev_tool.insert(key, t.schema_tokens);
+        }
+    }
+
+    if first_drift.is_empty() {
+        return None;
+    }
+    // Deterministic "component@step" list (BTreeMap ⇒ sorted by key).
+    let where_ = first_drift
+        .iter()
+        .map(|(name, ix)| format!("{name}@step {ix}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(Indictment {
+        code: "component-drift".to_string(),
+        detail: format!(
+            "{} same-named component(s) mutated mid-session: {where_} (~{} tok changed; a renamed tool reads as remove+add, not drift)",
+            first_drift.len(),
+            sat_sum(deltas.iter().copied())
+        ),
+        wasted_tokens: sat_sum(deltas.into_iter()),
     })
 }
 
@@ -958,7 +1301,7 @@ mod tests {
         assert_eq!(cache_break_wasted(200, 999, 256), None); // >  (kills >=→==/<=/<)
         assert_eq!(cache_break_wasted(130, 999, 256), None); // 260>=256 (kills *→+: 132<256)
         assert_eq!(cache_break_wasted(86, 999, 256), Some(170)); // 172<256 (kills *2→*3: 258>=256)
-        // saturating: no panic / wrap at the extreme.
+                                                                 // saturating: no panic / wrap at the extreme.
         assert_eq!(cache_break_wasted(usize::MAX, 64, 256), None);
     }
 
@@ -970,12 +1313,153 @@ mod tests {
         assert_eq!(common_prefix_len("xyz", "abc"), 0);
         // multi-byte: stop on the differing char, never mid-codepoint.
         assert_eq!(common_prefix_len("héllo", "héXlo"), 3); // 'h' + 'é'(2B)
-        // suffix, capped so it can never overlap the prefix region.
+                                                            // suffix, capped so it can never overlap the prefix region.
         assert_eq!(common_suffix_len("abcTAIL", "zzzTAIL", 4), 4);
         assert_eq!(common_suffix_len("abcTAIL", "zzzTAIL", 2), 2); // cap binds
         assert_eq!(common_suffix_len("abc", "abc", 100), 3);
         assert_eq!(common_suffix_len("abc", "xyz", 100), 0);
         assert_eq!(common_suffix_len(" café", "  fé", 10), 3); // 'f'+'é'(2B)
+    }
+
+    // C2 (D-011) — component-drift. PURE MEASUREMENT and the OPPOSITE of
+    // `preamble-repay`: a same-NAMED component (the `system` block, or a
+    // tool keyed by its name) whose bytes/size CHANGE between two of its
+    // appearances mid-session. Hash/size equality + step index + delta;
+    // NO judgment, NO "the model will forget X" (evalint KILLED). A tool
+    // rename reads as remove+add (NOT a drift event — drift requires the
+    // SAME name) — asserted here, stated in `detail`/`--deep`.
+    #[test]
+    fn component_drift_decision_exact_boundaries() {
+        // The pure per-appearance decision, pinned at its exact boundary
+        // so the approximate tokenizer cannot reach it through compose()
+        // (the D-010 technique). prev == cur ⇒ no event; any inequality
+        // ⇒ the saturating absolute magnitude (always >= 1).
+        assert_eq!(drift_delta(10, 10), None); // identical ⇒ stable
+        assert_eq!(drift_delta(10, 11), Some(1)); // grew by 1 (kills ==→!=)
+        assert_eq!(drift_delta(11, 10), Some(1)); // shrank by 1 (abs both ways)
+        assert_eq!(drift_delta(0, 0), None); // empty == empty ⇒ stable
+        assert_eq!(drift_delta(0, 1), Some(1)); // appeared/grew from 0
+        assert_eq!(drift_delta(5, 9), Some(4)); // exact magnitude, not a flag
+                                                // saturating: no panic / wrap at the extreme either direction.
+        assert_eq!(drift_delta(usize::MAX, 0), Some(usize::MAX));
+        assert_eq!(drift_delta(0, usize::MAX), Some(usize::MAX));
+    }
+
+    #[test]
+    fn component_drift_fires_only_when_a_same_named_component_mutates() {
+        // FIRES — system mutates between step 0 and step 1 (same key
+        // "system", different bytes). Tools stable.
+        let mut sys_drift = Timeline::new();
+        sys_drift.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"You are a careful assistant. Rule A applies.","messages":[{"role":"user","content":"a reasonably long first user question here"}]}"#,
+        );
+        sys_drift.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"You are a careful assistant. Rule B applies now.","messages":[{"role":"user","content":"a reasonably long second user question here"}]}"#,
+        );
+        assert!(
+            has_code(&sys_drift, "component-drift"),
+            "a mutated system block across steps MUST be indicted"
+        );
+        let d = compose(&sys_drift, false)
+            .indictments
+            .into_iter()
+            .find(|i| i.code == "component-drift")
+            .unwrap();
+        assert!(
+            d.detail.contains("system"),
+            "detail must name the drifted component: {}",
+            d.detail
+        );
+        assert!(
+            d.detail.contains("step 1"),
+            "detail must report the step index where it changed: {}",
+            d.detail
+        );
+        assert!(
+            d.wasted_tokens > 0,
+            "a real byte change must report a non-zero token delta"
+        );
+
+        // FIRES — a tool's schema mutates while its NAME is unchanged
+        // (the #1 silent cache-invalidation cause). System stable.
+        let mut tool_drift = Timeline::new();
+        tool_drift.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"stable system prompt of a reasonable length here","messages":[{"role":"user","content":"a reasonably long question"}],"tools":[{"name":"search","input_schema":{"type":"object"}}]}"#,
+        );
+        tool_drift.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"stable system prompt of a reasonable length here","messages":[{"role":"user","content":"a reasonably long question"}],"tools":[{"name":"search","input_schema":{"type":"object","properties":{"q":{"type":"string"},"k":{"type":"number"},"deep":{"type":"boolean"}},"required":["q"]}}]}"#,
+        );
+        assert!(
+            has_code(&tool_drift, "component-drift"),
+            "a same-named tool whose schema mutates MUST be indicted"
+        );
+        assert!(
+            compose(&tool_drift, false)
+                .indictments
+                .iter()
+                .find(|i| i.code == "component-drift")
+                .unwrap()
+                .detail
+                .contains("tool:search"),
+            "detail must name the drifted tool by its key"
+        );
+
+        // NOT FIRES — fully stable system + stable tools across 2 steps
+        // (this is exactly the `preamble-repay` case: identical re-payment,
+        // the OPPOSITE failure — C2 must stay silent here).
+        let mut stable = Timeline::new();
+        let stable_body = br#"{"model":"m","system":"You are a careful, terse assistant for the stable case.","messages":[{"role":"user","content":"a reasonably long first user question here"}],"tools":[{"name":"search","input_schema":{"type":"object"}}]}"#;
+        stable.record_request("POST", "/v1/messages", &[], stable_body);
+        stable.record_request("POST", "/v1/messages", &[], stable_body);
+        assert!(
+            !has_code(&stable, "component-drift"),
+            "an identical re-paid component is preamble-repay, NOT drift"
+        );
+
+        // NOT FIRES — a renamed tool reads as remove+add, never a drift
+        // event (drift requires the SAME name to change its bytes).
+        let mut renamed = Timeline::new();
+        renamed.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"stable system prompt of a reasonable length here","messages":[{"role":"user","content":"a reasonably long question"}],"tools":[{"name":"search_v1","input_schema":{"type":"object"}}]}"#,
+        );
+        renamed.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"stable system prompt of a reasonable length here","messages":[{"role":"user","content":"a reasonably long question"}],"tools":[{"name":"search_v2","input_schema":{"type":"object","properties":{"x":{"type":"string"}}}}]}"#,
+        );
+        assert!(
+            !has_code(&renamed, "component-drift"),
+            "a renamed tool is remove+add, not a same-name drift"
+        );
+
+        // NOT FIRES — a single step cannot drift (needs >=2 appearances).
+        let mut one = Timeline::new();
+        one.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","system":"a single-step system prompt of reasonable length","messages":[{"role":"user","content":"only one step here"}]}"#,
+        );
+        assert!(
+            !has_code(&one, "component-drift"),
+            "one appearance cannot drift"
+        );
     }
 
     // C1 (D-010) — cache-prefix-break. PURE MEASUREMENT: a short
@@ -992,8 +1476,11 @@ mod tests {
             "the quick brown fox jumps over the lazy dog ".repeat(40)
         );
         let mk = |model: &str, sys_fill: &str| {
-            format!(r#"{{"model":"{model}","system":"{}"{big_tail}"#, sys_fill.repeat(400))
-                .into_bytes()
+            format!(
+                r#"{{"model":"{model}","system":"{}"{big_tail}"#,
+                sys_fill.repeat(400)
+            )
+            .into_bytes()
         };
 
         // FIRES: tiny common prefix (system diverges almost immediately),
@@ -1010,7 +1497,10 @@ mod tests {
             .into_iter()
             .find(|i| i.code == "cache-prefix-break")
             .unwrap();
-        assert!(w.wasted_tokens > 0, "must report the re-sent broken-tail cost");
+        assert!(
+            w.wasted_tokens > 0,
+            "must report the re-sent broken-tail cost"
+        );
 
         // NOT FIRES — healthy: long identical prefix (stable system +
         // early messages), conversation only grows at the end.
@@ -1059,7 +1549,10 @@ mod tests {
         // NOT FIRES — single step (needs >=2 same-provider+model).
         let mut one = Timeline::new();
         one.record_request("POST", "/v1/messages", &[], &mk("m", "S"));
-        assert!(!has_code(&one, "cache-prefix-break"), "one step cannot break a cache prefix");
+        assert!(
+            !has_code(&one, "cache-prefix-break"),
+            "one step cannot break a cache prefix"
+        );
 
         // NOT FIRES — different model (prefix cache is per model).
         let mut diff_model = Timeline::new();
@@ -1068,6 +1561,431 @@ mod tests {
         assert!(
             !has_code(&diff_model, "cache-prefix-break"),
             "a different model is a different cache namespace, not a break"
+        );
+    }
+
+    // ---- C6 (D-013) — same-body re-send / retry-replay detection -------
+    // PURE MEASUREMENT: full-body byte-equality + count + the duplicated
+    // (re-billed) token weight + the buffered-response status of the
+    // replayed attempt. Whole-body sibling of repeated-block-across-turns.
+    // It REPORTS the fact only — it must NEVER throttle / circuit-break /
+    // intervene (that is `guard`; EXCLUDED here, research §c/§d).
+
+    #[test]
+    fn replay_wasted_exact_boundaries() {
+        // Deterministic exact-value table for the isolated cost decision
+        // (the approximate tokenizer cannot hit these boundaries through
+        // compose(); the D-010 technique). Each row kills a mutant on
+        // the multiply / saturation.
+        assert_eq!(replay_wasted(0, 5), 0); // empty body ⇒ no cost
+        assert_eq!(replay_wasted(100, 0), 0); // lone send ⇒ no extra copy
+        assert_eq!(replay_wasted(7, 1), 7); // one re-bill = one copy (kills `*`→`-`: 7-1=6)
+        assert_eq!(replay_wasted(7, 3), 21); // kills `*`→`+`(10) / `-`(4) / `/`(2) / `%`(1)
+                                             // saturating: an attacker `ctx open` body must not panic/wrap.
+        assert_eq!(replay_wasted(usize::MAX, 2), usize::MAX);
+        assert_eq!(replay_wasted(usize::MAX, 0), 0);
+    }
+
+    #[test]
+    fn request_replayed_fires_on_a_byte_identical_resend_with_status() {
+        // A real retry shape: the SAME assembled prompt is POSTed twice
+        // because attempt 1 got a 529 (overloaded). The HTTP/framework
+        // layer below the user's code re-issues it verbatim; only the
+        // wire shows the identical re-send.
+        let body = br#"{"model":"m","system":"You are a careful assistant for the replay fixture.","messages":[{"role":"user","content":"a reasonably long user question that will be retried verbatim"}]}"#;
+        let mut t = Timeline::new();
+        let i = t.record_request("POST", "/v1/messages", &[], body);
+        t.record_response(i, 529, &[], br#"{"type":"overloaded_error"}"#);
+        let j = t.record_request("POST", "/v1/messages", &[], body);
+        t.record_response(j, 200, &[], br#"{"content":[{"type":"text","text":"ok"}]}"#);
+
+        let c = compose(&t, false);
+        let ind = c
+            .indictments
+            .iter()
+            .find(|i| i.code == "request-replayed")
+            .expect("a byte-identical re-send MUST be indicted as request-replayed");
+        // 2 occurrences of one body ⇒ exactly 1 re-billed copy.
+        assert!(
+            ind.detail.contains('1'),
+            "detail must report the replay/re-billed count: {}",
+            ind.detail
+        );
+        // The re-billed cost = exactly one extra copy of the body tokens.
+        assert_eq!(
+            ind.wasted_tokens,
+            crate::tokenizer::count(std::str::from_utf8(body).unwrap()),
+            "wasted = exactly the re-sent (re-billed) copy"
+        );
+        // Status annotation from the ALREADY-BUFFERED response of the
+        // first (replayed) attempt — the real, re-billed retry cause.
+        assert!(
+            ind.detail.contains("529"),
+            "must annotate the replayed attempt's buffered status: {}",
+            ind.detail
+        );
+    }
+
+    #[test]
+    fn request_replayed_silent_on_distinct_bodies() {
+        // Control: two DIFFERENT bodies (a normal multi-turn run) must
+        // NOT fire — replay is whole-body byte-equality, not similarity.
+        let mut t = Timeline::new();
+        t.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","messages":[{"role":"user","content":"the first distinct question for this run"}]}"#,
+        );
+        t.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","messages":[{"role":"user","content":"a second, entirely different question here"}]}"#,
+        );
+        assert!(
+            !has_code(&t, "request-replayed"),
+            "two distinct bodies are a normal turn, never a replay"
+        );
+
+        // A single step cannot be a replay.
+        let mut one = Timeline::new();
+        one.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","messages":[{"role":"user","content":"only one request was ever sent"}]}"#,
+        );
+        assert!(
+            !has_code(&one, "request-replayed"),
+            "a lone request cannot have been replayed"
+        );
+
+        // An empty body is not an indictable replay even if repeated
+        // (no real re-billed prompt cost; avoids glue/noise).
+        let mut empties = Timeline::new();
+        empties.record_request("POST", "/v1/messages", &[], b"");
+        empties.record_request("POST", "/v1/messages", &[], b"");
+        assert!(
+            !has_code(&empties, "request-replayed"),
+            "empty bodies carry no re-billed prompt cost"
+        );
+    }
+
+    #[test]
+    fn request_replayed_counts_every_re_billed_copy() {
+        // 3 identical sends ⇒ 2 re-billed copies; a 4th distinct body is
+        // ignored. Pins the (occurrences - 1) weight and the count.
+        let dup = br#"{"model":"m","messages":[{"role":"user","content":"a verbatim body sent three separate times for the retry storm"}]}"#;
+        let mut t = Timeline::new();
+        for _ in 0..3 {
+            let i = t.record_request("POST", "/v1/messages", &[], dup);
+            t.record_response(i, 500, &[], b"{}");
+        }
+        t.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"m","messages":[{"role":"user","content":"an unrelated final body, not part of the storm"}]}"#,
+        );
+        let c = compose(&t, false);
+        let ind = c
+            .indictments
+            .iter()
+            .find(|i| i.code == "request-replayed")
+            .expect("3 identical sends must be indicted");
+        assert_eq!(
+            ind.wasted_tokens,
+            crate::tokenizer::count(std::str::from_utf8(dup).unwrap()) * 2,
+            "3 sends ⇒ exactly 2 re-billed copies"
+        );
+        assert!(
+            ind.detail.contains('2'),
+            "detail must report 2 re-billed copies: {}",
+            ind.detail
+        );
+    }
+
+    // --- C3 (D-012) context-window headroom & growth-rate slope --------
+    //
+    // PURE MEASUREMENT. Headline = the measured window fraction + the
+    // measured tokens/turn slope only (arithmetic on the labeled ±N%
+    // token series and the labeled offline window table). The
+    // "turns remaining at the observed mean rate" projection is a
+    // NEUTRAL arithmetic, `--deep` ONLY, never asserted as fate
+    // (that would be evalint — EXCLUDED). Unknown model id ⇒ NO window
+    // claim (skipped honestly, never guessed). Request-only.
+
+    /// A growing same-(provider,model) session: 3 turns whose prompt
+    /// grows by a fixed history increment each turn (the C3 slope is the
+    /// per-turn growth). Model id is a real Anthropic wire id ⇒ the
+    /// static window table resolves it.
+    fn growing_session(model: &str) -> Timeline {
+        let mut t = Timeline::new();
+        let big = "a reasonably substantial user message of stable length ".repeat(40);
+        for turn in 1..=3usize {
+            let msgs: Vec<String> = (0..turn)
+                .map(|k| format!(r#"{{"role":"user","content":"{big} #{k}"}}"#))
+                .collect();
+            let body = format!(
+                r#"{{"model":"{model}","system":"You are a careful, terse assistant.","messages":[{}]}}"#,
+                msgs.join(",")
+            );
+            let i = t.record_request("POST", "/v1/messages", &[], body.as_bytes());
+            t.record_response(i, 200, &[], br#"{"content":[{"type":"text","text":"ok"}]}"#);
+        }
+        t
+    }
+
+    #[test]
+    fn c3_headline_is_the_measured_fraction_and_slope_for_a_known_model() {
+        let c = compose(&growing_session("claude-3-5-sonnet-20241022"), false);
+        let h = c
+            .headroom
+            .as_ref()
+            .expect("a known model + >=2 turns must yield a headroom measurement");
+        // Window resolved from the static offline table (NOT guessed).
+        assert_eq!(h.window_tokens, 200_000);
+        assert_eq!(h.model, "claude-3-5-sonnet-20241022");
+        // The fraction is the focus step's prompt tokens / window — a
+        // pure integer-percent measurement (snapshot-stable, like `pct`).
+        assert!(h.used_tokens > 0);
+        assert!(
+            h.used_pct < 100,
+            "this fixture is well under the window: {}%",
+            h.used_pct
+        );
+        // Exact integer-percent check (no lossy cast): used_pct is the
+        // floored `used*100/window`, the same discipline as `pct()`.
+        let expect_pct = pct(h.used_tokens, h.window_tokens);
+        assert_eq!(h.used_pct, expect_pct, "fraction = floor(used*100/window)");
+        // The slope is the MEASURED mean growth across the session
+        // (tokens/turn). This fixture strictly grows ⇒ slope > 0.
+        assert_eq!(h.turns, 3);
+        assert!(
+            h.slope_tokens_per_turn > 0,
+            "a strictly growing session has a positive measured slope, got {}",
+            h.slope_tokens_per_turn
+        );
+        // The neutral arithmetic projection is `--deep` ONLY — it must
+        // NOT appear in the non-deep headline data.
+        assert!(
+            h.projection.is_none(),
+            "the headroom projection must be --deep-only, not in the headline"
+        );
+    }
+
+    #[test]
+    fn c3_projection_is_deep_only_and_neutrally_worded() {
+        let c = compose(&growing_session("claude-3-5-sonnet-20241022"), true);
+        let h = c.headroom.as_ref().expect("known model + >=2 turns");
+        let p = h
+            .projection
+            .as_ref()
+            .expect("--deep must add the neutral arithmetic projection");
+        // Neutral arithmetic phrasing ONLY — the research-doc discipline:
+        // "at the observed mean rate", never asserted as fate.
+        assert!(
+            p.contains("at the observed mean rate"),
+            "projection must be phrased as a neutral mean-rate arithmetic: {p:?}"
+        );
+        // It must NEVER assert overflow / truncation / prediction
+        // (that is evalint — EXCLUDED by construction).
+        for banned in [
+            "will overflow",
+            "will truncate",
+            "you will",
+            "run out",
+            "exceed",
+        ] {
+            assert!(
+                !p.to_lowercase().contains(banned),
+                "projection must not assert fate ({banned:?}): {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn c3_unknown_model_makes_no_window_claim() {
+        // Discipline rule: an unknown wire model id ⇒ NO window claim.
+        // Skipped honestly (None), never a fabricated window/fraction.
+        let c = compose(&growing_session("totally-unreleased-model-9000"), true);
+        assert!(
+            c.headroom.is_none(),
+            "an unknown model must yield NO headroom (no window claim), got {:?}",
+            c.headroom
+        );
+    }
+
+    #[test]
+    fn c3_single_turn_has_no_slope_so_no_headroom() {
+        // The slope needs >=2 turns (last-first over turns). A single
+        // turn cannot have a measured growth rate ⇒ skip honestly.
+        let mut t = Timeline::new();
+        t.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"claude-3-5-sonnet-20241022","system":"s","messages":[{"role":"user","content":"a short question here for the test"}]}"#,
+        );
+        let c = compose(&t, true);
+        assert!(
+            c.headroom.is_none(),
+            "a single turn has no measured slope ⇒ no C3 headroom, got {:?}",
+            c.headroom
+        );
+    }
+
+    #[test]
+    fn c3_step_namespace_is_exact_and_none_when_unknown() {
+        // Pure namespace helper: a single (provider, model) tuple or
+        // None. Pins that a step with no provider OR no model is in NO
+        // namespace (so a foreign step can never enter the C3 series).
+        let mut t = Timeline::new();
+        // Known provider + model ⇒ Some namespace.
+        t.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi there friend"}]}"#,
+        );
+        assert_eq!(
+            step_namespace(&t.steps[0]),
+            Some((
+                crate::adapter::Provider::Anthropic,
+                "claude-3-5-sonnet-20241022"
+            ))
+        );
+        // No provider (unrecognized path, no header) ⇒ None.
+        let mut u = Timeline::new();
+        u.record_request("POST", "/unknown/path", &[], br#"{"model":"gpt-4o"}"#);
+        assert_eq!(u.steps[0].provider, None);
+        assert_eq!(step_namespace(&u.steps[0]), None);
+        // Provider known but model absent ⇒ None (no fabricated id).
+        let mut v = Timeline::new();
+        v.record_request(
+            "POST",
+            "/v1/messages",
+            &[],
+            br#"{"messages":[{"role":"user","content":"no model field at all here"}]}"#,
+        );
+        assert_eq!(
+            v.steps[0].provider,
+            Some(crate::adapter::Provider::Anthropic)
+        );
+        assert_eq!(step_namespace(&v.steps[0]), None);
+    }
+
+    #[test]
+    fn c3_slope_is_scoped_to_the_focus_namespace_not_widened() {
+        // Mixed-namespace timeline: interleave a DIFFERENT (provider,
+        // model) between the focus model's turns. The C3 slope must be
+        // measured over the focus namespace's turns ONLY — a filter that
+        // widened across namespaces (an `&&`→`||`-class regression)
+        // would include the foreign step and corrupt turns/slope. This
+        // fixture makes that polarity observable (kills the missed
+        // pass-1 mutant by behaviour, complementing the by-construction
+        // tuple-equality elimination).
+        let mut t = Timeline::new();
+        let mk_anthropic = |n: usize| {
+            let msgs: Vec<String> = (0..n)
+                .map(|k| format!(r#"{{"role":"user","content":"anthropic turn body number {k} reasonably long"}}"#))
+                .collect();
+            format!(
+                r#"{{"model":"claude-3-5-sonnet-20241022","system":"s","messages":[{}]}}"#,
+                msgs.join(",")
+            )
+            .into_bytes()
+        };
+        // focus-namespace turn 1 (1 msg).
+        t.record_request("POST", "/v1/messages", &[], &mk_anthropic(1));
+        // a FOREIGN namespace step wedged in (different provider+model,
+        // huge prompt) — must NOT enter the focus series.
+        t.record_request(
+            "POST",
+            "/v1/chat/completions",
+            &[],
+            br#"{"model":"gpt-4o","messages":[{"role":"user","content":"a totally unrelated and very different openai turn that is quite long indeed"}]}"#,
+        );
+        // focus-namespace turn 2 (3 msgs) — the focus (last parsed of
+        // the Anthropic namespace order) and the slope endpoint.
+        t.record_request("POST", "/v1/messages", &[], &mk_anthropic(3));
+
+        let h = compose(&t, false)
+            .headroom
+            .expect("focus = a known Anthropic model with 2 same-namespace turns");
+        assert_eq!(h.model, "claude-3-5-sonnet-20241022");
+        assert_eq!(h.window_tokens, 200_000);
+        // EXACTLY 2 turns counted (the 2 Anthropic turns), NOT 3 — the
+        // foreign gpt-4o step is excluded by the namespace filter.
+        assert_eq!(
+            h.turns, 2,
+            "the foreign-namespace step must NOT be in the C3 series"
+        );
+        // Growing within the focus namespace ⇒ a positive measured slope
+        // computed from the focus turns only.
+        assert!(h.slope_tokens_per_turn > 0);
+    }
+
+    #[test]
+    fn c3_slope_per_turn_exact_boundaries() {
+        // Deterministic exact-value table — the approximate tokenizer
+        // cannot hit these boundaries through compose(), so the pure
+        // decision is pinned here (the proven D-010 technique). Each row
+        // kills a specific arithmetic/comparison mutant.
+        // < 2 turns ⇒ None (no measurable rate); == 2 ⇒ Some.
+        assert_eq!(slope_per_turn(100, 100, 0), None);
+        assert_eq!(slope_per_turn(100, 100, 1), None);
+        assert_eq!(slope_per_turn(100, 300, 2), Some(200)); // (300-100)/1
+                                                            // span = turns - 1 (kills `-`→`+` and off-by-one on the divisor):
+        assert_eq!(slope_per_turn(100, 400, 4), Some(100)); // (400-100)/3
+                                                            // flat ⇒ exactly 0 (kills a mutant that fabricates growth):
+        assert_eq!(slope_per_turn(500, 500, 3), Some(0));
+        // shrinking ⇒ a real NEGATIVE slope, never clamped to 0:
+        assert_eq!(slope_per_turn(900, 300, 3), Some(-300)); // (300-900)/2
+                                                             // truncating integer division is intentional & snapshot-stable:
+        assert_eq!(slope_per_turn(0, 10, 3), Some(5)); // 10/2
+        assert_eq!(slope_per_turn(0, 10, 4), Some(3)); // 10/3 floor
+    }
+
+    #[test]
+    fn c3_turns_until_window_exact_boundaries() {
+        // The NEUTRAL `--deep` projection arithmetic. slope <= 0 ⇒ None
+        // (no honest "turns remaining" — kills `<=`→`<`/`==`):
+        assert_eq!(turns_until_window(100, 1000, 0), None);
+        assert_eq!(turns_until_window(100, 1000, -5), None);
+        // remaining = window - used; whole turns at the mean rate:
+        assert_eq!(turns_until_window(100, 1000, 100), Some(9)); // 900/100
+        assert_eq!(turns_until_window(0, 1000, 300), Some(3)); // 1000/300 floor
+                                                               // used == window ⇒ no positive headroom ⇒ None (kills the
+                                                               // `remaining == 0` guard and `checked_sub` underflow):
+        assert_eq!(turns_until_window(1000, 1000, 50), None);
+        // used > window ⇒ checked_sub None ⇒ None (no negative figure):
+        assert_eq!(turns_until_window(1500, 1000, 50), None);
+    }
+
+    #[test]
+    fn c3_slope_is_signed_and_zero_when_flat() {
+        // A same-size repeated prompt across turns ⇒ measured slope 0
+        // (pins the arithmetic against a mutant that fabricates growth).
+        let mut t = Timeline::new();
+        let body = br#"{"model":"gpt-4o-2024-08-06","messages":[{"role":"system","content":"sys"},{"role":"user","content":"an identical, stable user prompt repeated each turn here"}]}"#;
+        for _ in 0..3 {
+            let i = t.record_request("POST", "/v1/chat/completions", &[], body);
+            t.record_response(
+                i,
+                200,
+                &[],
+                br#"{"choices":[{"message":{"content":"ok"}}]}"#,
+            );
+        }
+        let h = compose(&t, false)
+            .headroom
+            .expect("known model + 3 turns ⇒ headroom present");
+        assert_eq!(h.window_tokens, 128_000);
+        assert_eq!(
+            h.slope_tokens_per_turn, 0,
+            "a flat (non-growing) session has a measured slope of exactly 0"
         );
     }
 }

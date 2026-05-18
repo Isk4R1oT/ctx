@@ -512,3 +512,311 @@ prefix`); an identical stable prefix ⇒ correctly SILENT. `/rust-review`
 substituted by in-thread tool-grounded self-review (pure / total /
 char-safe / true-positive-gated) — deliberately NOT subagent-delegated
 (D-008 incident). Recorded as a substitution, not an independent SHIP.
+
+## D-011 — C2: component-drift, a new pure-measurement F1 indictment (2026-05-18)
+
+### Status: LOCKED. Additive (the PROJECT.md §8 "versioned indictment ruleset" seam). Does not relitigate D-001..D-010; evalint stays KILLED.
+
+**Why.** A framework silently mutating a component the engineer believes
+is stable — the `system` block, or a tool's schema — between turns of one
+live run is the #1 cause of both cache invalidation and a "stable"
+instruction changing under the engineer's feet. It is the OPPOSITE of
+`preamble-repay` (D-?, F1): that counts an *identical* component re-paid;
+C2 catches a same-NAMED component whose bytes/size CHANGE mid-session.
+Every incumbent has prompt-*version* diff (a registry concept: v1 vs v2
+of a managed prompt); none has "the same logical component changed bytes
+between step 3 and step 4 of one live run", because that needs the
+per-step verbatim wire timeline their SDK→DB→dashboard architecture does
+not have. Deepens the locked moat (per-step diff ∩ waste indictment ∩
+wire capture); ranked HIGH by `docs/CONTEXT-SIGNALS-RESEARCH.md` §(c) C2,
+whose definition / "pure-measurement?" / caveat this entry obeys exactly.
+
+**Rule (pure measurement).** `indict_component_drift`: walk steps in
+order; per component key (`system`, and each tool keyed by `tool:<name>`)
+compare its current fingerprint to its previous appearance. `system`
+fingerprints on its **exact bytes** (byte change ⇒ event; the byte delta
+is exact, the token delta is the labeled ±N% estimate). Each tool
+fingerprints on the **size the canonical `Assembled` view exposes**
+(`schema_tokens`). Emit one `component-drift` indictment iff >=1 same-
+named component mutated, listing each drifted component pinned to the
+FIRST step index where it changed (deterministic `BTreeMap` ordering) and
+the summed token delta. The per-appearance decision is isolated in the
+pure `drift_delta(prev,cur)` helper — ONE `==` + ONE saturating
+abs-difference — with an exact-boundary unit table (the approximate
+tokenizer cannot reach those values through `compose()`; the D-010
+technique applied preemptively). Strictly counts/bytes/tokenizer-sums/
+integer compares — NO prediction, NO "the model will forget X" (evalint
+KILLED; the lost-in-the-middle framing is the §(d) excluded class).
+
+**Honest limits (recorded, not buried).**
+- Tool drift is detected at the **tokenizer-size granularity** the
+  canonical `Assembled` view exposes, NOT at byte granularity:
+  `WireTool` carries `name` + `schema_tokens` only, not the raw schema
+  bytes. Re-deriving schema bytes in `compose.rs` would duplicate the
+  adapter (D-007/D-008) or require an `Assembled` shape change (the
+  goal's explicit HALT condition — a struct `agentlock`/`guard` share).
+  So a tool-schema mutation that leaves `schema_tokens` unchanged is a
+  **deliberate honest false-negative** (the D-010 true-positive-bias
+  discipline: under-claims rather than over-claims). `system` is exact
+  (full bytes are in `Assembled`).
+- The token figures ride the offline ±N% tokenizer; the `system`
+  byte-change detection itself is exact.
+- A renamed tool is a different key ⇒ remove+add, NEVER a drift event
+  (drift requires the SAME name to change). Asserted by a test and
+  stated verbatim in the `detail` string — not inferred (per §(c) C2
+  caveat).
+- Request-only; needs >=2 appearances of the same-named component.
+
+**No `Assembled` shape change (the HALT guard held).** C2 reads only
+`a.system` and `a.tools` — fields the canonical view already exposes.
+Zero new dependencies (stdlib `BTreeMap` + the existing tokenizer). The
+existing F1 snapshots are untouched: the snapshot fixture sends a
+byte-identical system + identical tools across both steps, so C2 is
+correctly SILENT there (it is `preamble-repay`'s opposite) — verified, no
+snapshot regeneration.
+
+**Indictment surface.** `code = "component-drift"`; one-line `detail`:
+`"<N> same-named component(s) mutated mid-session: <key>@step <ix>, … (~<T> tok changed; a renamed tool reads as remove+add, not drift)"`;
+`wasted_tokens` = saturating sum of the per-event absolute token deltas
+(matches the field's "per-rule measured waste", non-partition note).
+
+**Gates (real, non-vacuous).** TDD red-first: the failing compose.rs
+behavioral test was proven RED on worktree HEAD `0a07bd4` (panic "a
+mutated system block across steps MUST be indicted") while the other 16
+compose tests + the full 109 suite stayed green, recorded in
+RUSTCC-USAGE.md, `#[ignore]`-with-reason at the test commit `719cc81`,
+un-ignored in the impl commit `e87c0ff`. `just check` clippy `-D
+warnings` 0; `just test` **111/111, 0 skipped** + doctests (+2 vs the
+109 baseline = the un-ignored behavioral test + the `drift_delta`
+boundary table; zero regression — purely additive). `cargo deny`
+advisories/bans/licenses/sources ok; `cargo machete` no unused deps
+(no new deps). cargo-mutants `--in-diff` on the C2 surface, **two
+independent REAL non-vacuous baselines**: run 1 baseline `ok 71s build +
+29s test` → 10 mutants → **8 caught, 2 unviable, 0 MISSED**; run 2
+baseline `ok 41s build + 15s test` → **8 caught, 2 unviable, 0 MISSED**
+(stable). The 2 unviable are non-compiling `Default::default()`
+substitutions (correctly unviable, not equivalent-and-missed). 0 missed
+on pass 1 *by construction* — the decision was isolated in `drift_delta`
+from the start, so unlike D-010 no 2-pass restructuring was needed; no
+equivalent mutant to eliminate. Real e2e (green != works): a real 2-turn
+python httpx client through `ctx run --save` (dummy `Authorization:
+Bearer test`, natural `/v1/chat/completions`, upstream 404 ignored —
+request captured before forward, $0, no real key) — MODE=drift (turn 2
+mutates the system prompt under the same provider+model) ⇒ FIRES
+(`component-drift wasted_tokens=1 … system@step 1 (~1 tok changed …)`),
+and round-trips post-hoc through `ctx open`; MODE=stable (byte-identical
+system on turn 2) ⇒ correctly SILENT (only `preamble-repay`/
+`unused-loaded-tools` fire), also post-hoc. `/rust-review` not invocable
+in-thread ⇒ substituted by an in-thread tool-grounded self-review (pure
+/ total / panic-free / no `Assembled` change / deterministic / renamed-
+tool=remove+add) — deliberately NOT subagent-delegated (D-008 integrity
+incident). Recorded as a substitution, not an independent SHIP. No false
+green.
+## D-012 — C3: context-window headroom & growth-rate slope, a new pure-measurement signal (2026-05-18)
+
+### Status: LOCKED. Additive (the PROJECT.md §8 static-registry seam, alongside the F1 headline). Does not relitigate D-001..D-011; evalint stays KILLED.
+
+**Why.** Frameworks silently grow the assembled context turn over turn;
+the single most-cited agent pain is not seeing *what is actually in the
+window* and *how fast it is filling*. Every incumbent shows per-call
+token *totals*; none plots the assembled-context growth slope vs the
+model's window from the **wire**, because their SDK→DB→dashboard
+architecture does not model the prompt as a per-step series of assembled
+bytes. `ctx` already holds that series (the F0 timeline `prompt_tokens`).
+Ranked **MED** by the independent research artifact
+`docs/CONTEXT-SIGNALS-RESEARCH.md` §(c) C3 — *MED not for the code
+(trivial) but for the discipline risk*: a "headroom / turns remaining"
+framing is one wording slip away from a quality *prediction* (evalint,
+KILLED). This entry records the constraint that keeps it pure.
+
+**The signal (pure measurement).** Per the focus step (the last
+structurally-parsed step, same as the F1 headline focus):
+- **Window fraction** — `prompt_tokens` (the existing F0-computed ±N%
+  estimate) as an integer percent of the model's context window. The
+  window is a **static offline registry** (`src/window.rs`, the §8
+  seam), keyed by a case-insensitive longest-substring match on the
+  wire model id, carrying its own honest label `WINDOW_LABEL`
+  ("offline static window table, approximate (never calls an API)") —
+  the C3 analogue of the tokenizer's `±N%`. No API call (zero-config
+  core).
+- **Growth slope** — the measured mean `(last − first) / (turns − 1)`
+  tokens/turn over the **same-(provider, model)** turns (a different
+  model is a different budget; its turns are not in the series). Signed
+  `i64` (a shrinking session is a real negative slope, never clamped).
+- **Headline = the fraction + the slope ONLY.** Integer-only
+  (`used_pct`, `slope_tokens_per_turn`), snapshot-stable, no float —
+  mirrors the existing `pct` integer discipline; additive
+  `Composition.headroom: Option<Headroom>` preserves the D-005 `--json`
+  contract (`steps` stays top-level — verified at `report_json`).
+
+**The DISCIPLINE constraint that keeps it pure (the reason this is a
+signal, not evalint).** Any "turns remaining" figure is a *projection*,
+which is contestable. It is therefore:
+- **`--deep`-ONLY** (absent from the headline and from non-`--deep`
+  `--json`; gated in `compose`, the renderer never decides), and
+- **worded as neutral arithmetic** — verbatim: *"at the observed mean
+  rate (~S tok/turn over N turn(s)), ~K more turn(s) before the W-tok
+  window is reached (neutral arithmetic projection, not a prediction)"*.
+  It NEVER says "you will overflow", "the model will truncate", "you
+  will run out" — a test (`c3_projection_is_deep_only_and_neutrally_
+  worded` + the snapshot guards) makes that banned-phrasing class a hard
+  CI failure forever. The extrapolation is pure division on the labeled
+  estimates, not a claim about fate (that would be evalint — EXCLUDED,
+  CONTEXT-SIGNALS-RESEARCH.md §(d)).
+
+**Honest limits (recorded, not buried).**
+- The window table is a **maintained approximation** — context-window
+  sizes drift per model release (`[INFER]`, research §(e)); labeled like
+  the ±N% tokenizer, never sold as exact.
+- An **unknown wire model id ⇒ NO window claim** (skipped honestly,
+  `headroom: None` — never a guessed size/fraction). A session with
+  **< 2 same-namespace turns ⇒ no measurable slope ⇒ no C3 claim** at
+  all. The two gates are independent (a known model with one turn is
+  still silent).
+- The token figures ride the existing offline ±N% tokenizer (byte→token
+  is an approximation); the slope is exact integer arithmetic on that
+  approximate series. Request-only; round-trips post-hoc (`ctx open`).
+- The slope is a coarse `(last − first)/(turns − 1)` mean, not a fitted
+  regression — deliberately the simplest honest arithmetic (research
+  §(c) "least-effort"), no smoothing, no trend claim.
+
+**Gates (real, non-vacuous).** TDD red-first: the `c3_*` compose tests
+**fail to compile on the worktree HEAD** (`no field 'headroom' on
+Composition`, 7×) with the rest of the suite green (109 nextest + 91
+lib) — proven before impl. Compiler-truth loop (`just check`,
+clippy `-D warnings` incl. pedantic): the digest named
+*too-many-lines* / *u128-as-u32-truncate* / *useless-conversion*; fixed
+root-cause-first (extracted `headroom_tty`; replaced the lossy test
+cast with the exact `pct()` check). `just test` = **129 nextest + 100
+lib** green + doctests; `cargo deny`/`machete` ok (no new deps —
+`window.rs` is pure data + std). cargo-mutants `--in-diff` on the C3
+surface, REAL baselines (explicitly not vacuous/timed-out):
+- **Run 1** — baseline `ok 25s build + 8s test`, 28 mutants → **1
+  MISSED**: `replace && with || in headroom` (the `provider && model`
+  series filter; all prior fixtures used a single namespace so `&&`≡
+  `||`). **NOT accepted.** Eliminated **BY CONSTRUCTION** (the proven
+  D-010 technique): the namespace match became a single `(provider,
+  model)` **tuple equality** via the pure `step_namespace` helper — no
+  `&&` operator remains to widen into a namespace-crossing `||` — plus
+  a discriminating mixed-namespace fixture (a foreign `gpt-4o` step
+  wedged between focus Anthropic turns; pins `turns == 2`, not 3) and
+  exact-value `step_namespace` pins.
+- **Run 2** — baseline `ok 31s build + 14s test`, 29 mutants → **25
+  caught, 4 unviable, 0 MISSED**. The pure helpers `slope_per_turn` /
+  `turns_until_window` carry deterministic exact-boundary unit tables
+  (the approximate tokenizer cannot reach those boundaries through
+  `compose`); every `window.rs` table entry is exact-value pinned.
+
+Real e2e (green ≠ works): a real python-httpx **multi-turn growing**
+conversation through `ctx run --save /tmp/c3.db` (DUMMY
+`Authorization: Bearer test`, natural `/v1/chat/completions` — upstream
+404s, request captured BEFORE forward, $0, no real key). `ctx open`
+headline shows `window gpt-4o 561/128000 tok 0% slope 146 tok/turn over
+4 turn(s) (...approximate...)` and **no** projection; `ctx --deep open`
+adds exactly `window-projection at the observed mean rate (~146
+tok/turn over 4 turn(s)), ~872 more turn(s) before the 128000-tok
+window is reached (neutral arithmetic projection, not a prediction)`.
+A single-turn known-model session and an unknown-model session each
+emit **zero** window claims even with `--deep`. `--json`/`--deep
+--json` confirm `steps` top-level + integer-only `headroom`.
+`/rust-review`/`/rust-harden` skills not invocable in-thread →
+substituted by the tool-grounded compiler-truth loop + the 2-pass real
+cargo-mutants evidence above; deliberately NOT subagent-delegated
+(D-008 integrity incident). Recorded as a substitution, not an
+independent SHIP. evalint stays KILLED — no kill-zone, no graph, no
+hosted anything; no false green.
+
+## D-013 — C6: request-replayed, a new pure-measurement F1 indictment (2026-05-18)
+
+### Status: LOCKED. Additive (the PROJECT.md §8 "versioned indictment ruleset" seam). Does not relitigate D-001..D-010; evalint stays KILLED; graph stays REFUTED.
+
+**Why.** A retry after a 429/5xx, or an idempotent re-issue, is emitted
+by an HTTP-client/framework layer *below* the user's code — the engineer
+usually cannot see that the SAME assembled prompt was re-sent verbatim,
+nor the real, re-billed token cost of it. Every incumbent treats retry
+storms as a *tracing* concern (count retry spans); none asserts "this
+exact assembled prompt was re-sent byte-for-byte, here is the duplicated
+token cost" from wire byte-equality, because their SDK→DB→dashboard
+architecture has no verbatim cross-step request timeline. `ctx` already
+holds every request body byte-exact (F0) and buffers responses (F0,
+D-004) — C6 is a hash-equality pass over data it already has, deepening
+the locked moat (composition+waste ∩ per-step diff ∩ zero-config wire
+capture), not drifting from it. Spec'd and ranked by the independent
+research artifact `docs/CONTEXT-SIGNALS-RESEARCH.md` §(c) C6.
+
+**Rule (pure measurement).** `indict_request_replayed`: group steps by
+the **verbatim request body** (non-empty only — an empty body carries no
+re-billed prompt cost, mirroring the block rules' `MIN_BLOCK_BYTES`
+discipline); a body occurring in `>= 2` steps is a replay. Reports the
+total re-billed copies (`Σ occurrences − 1`), the count of distinct
+replayed bodies, the duplicated token weight (`Σ tokenizer::count(body)
+× (occurrences − 1)`), and — from F0's ALREADY-BUFFERED response — the
+status of the *first occurrence of the most-replayed body* (the attempt
+that was retried; e.g. "first replayed attempt returned 529"), or an
+honest "status not captured" when no response was buffered (never a
+fabricated status). Strictly full-body byte-equality + counts +
+tokenizer sums + the buffered status — NO judge, NO score, NO prediction
+(evalint KILLED).
+
+**The `guard`-boundary (honest, load-bearing).** C6 BORDERS `guard`'s
+territory (the deterministic loop/cost circuit-breaker). `ctx` only
+**REPORTS the fact** — it MUST NEVER throttle, rate-limit, circuit-break,
+de-duplicate, or otherwise intervene/remediate. That is `guard` and is
+**EXCLUDED here by construction** (CONTEXT-SIGNALS-RESEARCH §c/§d; the
+function returns an `Option<Indictment>` and has no side effect, no
+network, no mutation of the timeline). This boundary is the reason C6 is
+request-only for the core fact and a pure measurement, not an action.
+
+**Honest limits (recorded, not buried).** (1) Whole-body **exact**
+byte-equality only — a retry that changed even one byte (e.g. an
+idempotency-key header is not in the body, but a per-attempt nonce in the
+body would be) is a deliberate honest false-negative (under-claims rather
+than over-claims; near-duplicate is contestable and EXCLUDED per
+research §d). (2) Token figures ride the offline ±N% tokenizer (labelled
+in the summary line); the byte-equality and counts are exact. (3)
+Request-only; needs >=2 steps. (4) The status annotation is the
+most-replayed body's *first* occurrence only (one representative status,
+not a per-attempt list — kept minimal and pure; `--deep` per-attempt
+status is a possible future seam, not built). (5) When the upstream is
+unreachable the proxy synthesizes a 502 and does **not** `record_response`
+(F0 forward-error path), so the annotation is the honest "status not
+captured" — observed and accepted in the real e2e, not hidden. (6)
+Streaming-vs-buffered does not affect C6 (request-side; D-004).
+
+**Scope (HALT condition checked, NOT triggered).** C6 reads only
+`step.request.body` / `step.response` / (no `Assembled` needed). It does
+**not** touch `adapter.rs::Assembled` or any shared F0 struct — no
+re-architecture, no F0/R regression (snapshots use two *different*
+bodies ⇒ C6 correctly silent there; all pre-existing snapshots
+unchanged). The HALT-if-it-needs-`Assembled` invariant was explicitly
+verified false before implementation.
+
+**Gates (real, non-vacuous).** TDD red-first: three `compose.rs` tests
+written and proven RED on worktree HEAD `410c790`
+(`request_replayed_*` → 2 failed / 1 control-pass) with the rest of the
+suite green (**109/109**), committed before the feature. `just check`
+clippy `-D warnings` **0**; `just test` **113/113** + doctests;
+`cargo deny`/`machete` ok (**no new deps** — reuses `tokenizer` + std).
+cargo-mutants `--in-diff` on the C6 surface, **two independent passes,
+both 0 missed on a REAL baseline**: pass 1 = **11 caught, 2 unviable,
+0 missed** (`Unmutated baseline ok 31s build + 8s test`); pass 2 =
+**11 caught, 2 unviable, 0 missed** (fresh `Unmutated baseline ok 40s
+build + 14s test`). 0-missed was reached **by construction** (proactive
+D-010 technique: the cost decision isolated in the pure
+`replay_wasted` helper with an exact-boundary unit table; std
+`filter(len()>=2)`/`max_by_key`/`sat_sum` instead of hand
+`<`/`||`/compound booleans; `!is_empty` + `wasted==0` guards) — NOT by
+post-hoc test patching; the 2 unviable are the non-compiling
+`Default::default()` return arms (genuinely unviable, not skipped).
+Real e2e through the `ctx` binary (real python httpx clients, no real
+key, DUMMY `Authorization: Bearer test`, natural
+`/v1/chat/completions`, $0): same body POSTed twice ⇒ **fires**
+(`request-replayed wasted_tokens=60`); two different bodies ⇒ correctly
+**SILENT**; `ctx open`/`--json` round-trip the indictment post-hoc; a
+local 529 upstream ⇒ the buffered-status path reports "first replayed
+attempt returned 529" (the research §c shape). `/rust-review` +
+`/rust-harden` not invocable in-thread → substituted by an in-thread
+tool-grounded self-review (pure / total / panic-free / saturating /
+byte-equality-only / zero `guard`-style intervention) — deliberately
+NOT subagent-delegated (D-008 review-subagent integrity incident).
+Recorded as a substitution, not an independent SHIP.

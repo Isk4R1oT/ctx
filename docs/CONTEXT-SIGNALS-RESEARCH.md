@@ -6,9 +6,14 @@
 > and the evalint kill (PURE MEASUREMENT only in the headline). Soft claims are
 > flagged `[INFER]`; URLs in §(e).
 >
-> **Status (current state).** C1 is **implemented** as the
-> `cache-prefix-break` F1 indictment — see `DECISIONS.md` D-010
-> (2026-05-18). C2–C7 remain ranked candidates (not yet built).
+> **Status (current state).** Implemented as pure-measurement F1
+> signals (all 2026-05-18): C1 `cache-prefix-break` (D-010), C2
+> `component-drift` (D-011), C3 context-window headroom & slope
+> (D-012), C6 `request-replayed` (D-013). C4 and C5 remain ranked
+> candidates. **C7 deferred by decision (2026-05-18):** ranked LOW +
+> the honest `store.rs`-does-not-persist-request-headers substrate
+> blocker (shared F0 surface with agentlock/guard) — not built
+> rather than silently half-shipped.
 
 ---
 

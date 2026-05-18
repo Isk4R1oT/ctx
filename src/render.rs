@@ -375,12 +375,80 @@ impl Renderer {
                 ind.code, ind.wasted_tokens, ind.detail
             )?;
         }
+        if let Some(h) = &comp.headroom {
+            // C3 (D-012) headline = the measured fraction + the measured
+            // slope ONLY (pure arithmetic on the labeled estimates,
+            // never a prediction). The neutral mean-rate projection is
+            // `--deep`-only — `h.projection` is `None` here unless
+            // `--deep` populated it in `compose`.
+            writeln!(
+                out,
+                "window {} {}/{} tok {}% slope {} tok/turn over {} turn(s) ({})",
+                h.model,
+                h.used_tokens,
+                h.window_tokens,
+                h.used_pct,
+                h.slope_tokens_per_turn,
+                h.turns,
+                crate::window::WINDOW_LABEL
+            )?;
+            if let Some(p) = &h.projection {
+                writeln!(out, "window-projection {p}")?;
+            }
+        }
         writeln!(
             out,
             "summary: {} tokens, {} finding(s) ({})",
             comp.total_tokens,
             comp.indictments.len(),
             crate::tokenizer::ACCURACY_LABEL
+        )
+    }
+
+    /// C3 (D-012) TTY block. Headline = the measured fraction + the
+    /// measured slope ONLY (pure arithmetic on the labeled estimates).
+    /// The neutral mean-rate projection is `--deep`-only — `h.projection`
+    /// is `None` here unless `--deep` populated it in `compose`; this
+    /// renderer never decides headline-vs-deep, it only prints what
+    /// `compose` already gated. No-op when there is no window claim.
+    fn headroom_tty(
+        out: &mut impl Write,
+        acc: Style,
+        faint: Style,
+        headroom: Option<&crate::compose::Headroom>,
+    ) -> std::io::Result<()> {
+        let Some(h) = headroom else { return Ok(()) };
+        writeln!(out)?;
+        writeln!(out, "{}", paint(acc, "Window"))?;
+        writeln!(
+            out,
+            "  {} {}",
+            paint(faint, &RESULT.to_string()),
+            paint(
+                faint,
+                &format!(
+                    "{} {SUB} {}/{} tok {SUB} {}% {SUB} slope {} tok/turn over {} turn(s)",
+                    h.model,
+                    h.used_tokens,
+                    h.window_tokens,
+                    h.used_pct,
+                    h.slope_tokens_per_turn,
+                    h.turns
+                )
+            )
+        )?;
+        if let Some(p) = &h.projection {
+            writeln!(
+                out,
+                "  {} {}",
+                paint(faint, &SUB.to_string()),
+                paint(faint, p)
+            )?;
+        }
+        writeln!(
+            out,
+            "  {}",
+            paint(faint, &format!("{SUB} {}", crate::window::WINDOW_LABEL))
         )
     }
 
@@ -447,6 +515,7 @@ impl Renderer {
                 )?;
             }
         }
+        Self::headroom_tty(out, acc, faint, comp.headroom.as_ref())?;
         writeln!(out)?;
         writeln!(out, "{}", paint(acc, "Summary"))?;
         writeln!(
