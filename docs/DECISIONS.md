@@ -928,7 +928,7 @@ behavioral test was written FIRST and **proven RED on worktree HEAD
 `dc895aa`** (panic: "a changed sampling field across same-(provider,
 model) turns MUST be indicted") while the full **135** suite stayed
 green — recorded in RUSTCC-USAGE.md, `#[ignore]`-with-reason at the
-test commit `8ed4af0` (commit-gate/suite green), un-ignored in the impl
+test commit `bb06a4c` (commit-gate/suite green), un-ignored in the impl
 commit `8661dd0`. Compiler-truth loop (`just check`, clippy `-D
 warnings` incl. pedantic): the PostToolUse `rustcc gate` digest named
 ONE root-cause class — `doc_markdown` "item in documentation is missing

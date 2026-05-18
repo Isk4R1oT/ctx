@@ -679,7 +679,7 @@ not an independent SHIP.
   param_change`, ×5) — the boundary table was moved to the impl commit
   (it cannot be `#[ignore]`d), leaving a clean runtime-RED behavioral
   test that compiles ⇒ `#[ignore]`-with-reason keeps the commit-gate +
-  suite green at the test commit `8ed4af0`; un-ignored at the impl
+  suite green at the test commit `bb06a4c`; un-ignored at the impl
   commit `8661dd0` (the D-010/D-013 red-first discipline; C3 had to
   bundle test+impl because its RED was a compile-fail — C4 avoided that
   by structuring the RED as a runtime panic, the C2 pattern).
