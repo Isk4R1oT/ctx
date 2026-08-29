@@ -534,6 +534,171 @@ impl Renderer {
     }
 }
 
+// --- F4 zoned context view --------------------------------------------
+
+use crate::zones::{Evidence, Span, Zone};
+
+/// Zone → colour. Distinct hues, because the whole point of the view is
+/// telling zones apart at a glance; `Ansi16` collapses to the nearest
+/// basic colour rather than dropping the distinction.
+fn zone_style(mode: ColorMode, z: Zone) -> Style {
+    let rgb = match z {
+        Zone::Instructions => (0x56, 0xB6, 0xC2),
+        Zone::Memory => (0xC6, 0x78, 0xDD),
+        Zone::Tools => (0xE5, 0xC0, 0x7B),
+        Zone::Input => (0x98, 0xC3, 0x79),
+        Zone::Output => (0x61, 0xAF, 0xEF),
+        Zone::ToolCall => (0xD1, 0x9A, 0x66),
+        Zone::ToolResult => (0xE8, 0x8B, 0x3A),
+        Zone::Injected => (0xE0, 0x6C, 0x75),
+    };
+    let a256 = match z {
+        Zone::Instructions => 73,
+        Zone::Memory => 140,
+        Zone::Tools => 179,
+        Zone::Input => 107,
+        Zone::Output => 75,
+        Zone::ToolCall => 173,
+        Zone::ToolResult => 208,
+        Zone::Injected => 167,
+    };
+    let a16 = match z {
+        Zone::Instructions => AnsiColor::Cyan,
+        Zone::Memory => AnsiColor::Magenta,
+        Zone::Tools => AnsiColor::Yellow,
+        Zone::Input => AnsiColor::Green,
+        Zone::Output => AnsiColor::Blue,
+        Zone::ToolCall => AnsiColor::BrightYellow,
+        Zone::ToolResult => AnsiColor::BrightRed,
+        Zone::Injected => AnsiColor::Red,
+    };
+    let c = match mode {
+        ColorMode::Truecolor => Some(Color::Rgb(RgbColor(rgb.0, rgb.1, rgb.2))),
+        ColorMode::Ansi256 => Some(Color::Ansi256(anstyle::Ansi256Color(a256))),
+        ColorMode::Ansi16 => Some(Color::Ansi(a16)),
+        ColorMode::None => None,
+    };
+    Style::new().fg_color(c)
+}
+
+const BAR_W: usize = 20;
+
+fn bar(part: usize, total: usize) -> String {
+    let filled = part
+        .saturating_mul(BAR_W)
+        .checked_div(total.max(1))
+        .unwrap_or(0)
+        .min(BAR_W);
+    format!(
+        "{}{}",
+        "\u{2588}".repeat(filled),
+        "\u{2591}".repeat(BAR_W - filled)
+    )
+}
+
+/// `ColorMode::None` — one tab-separated record per line, so a zone can be
+/// pulled out with `grep`. Summary rows first (`zone<TAB>name<TAB>tokens<TAB>pct`),
+/// then every content line prefixed by its zone and label.
+fn zones_plain(w: &mut impl Write, spans: &[Span], total: usize) -> std::io::Result<()> {
+    for (z, t) in crate::zones::totals(spans) {
+        writeln!(w, "zone\t{}\t{}\t{}", z.name(), t, pct_of(t, total))?;
+    }
+    for s in spans {
+        for line in s.text.lines() {
+            writeln!(w, "{}\t{}\t{}", s.zone.name(), s.label, line)?;
+        }
+    }
+    Ok(())
+}
+
+fn pct_of(part: usize, total: usize) -> usize {
+    part.saturating_mul(100).checked_div(total.max(1)).unwrap_or(0)
+}
+
+/// F4 — the whole assembled context, split into zones and painted.
+///
+/// Prints the full content, not a sample: the view exists to answer "what
+/// is actually in the window at this step", and a truncated answer to that
+/// is the same as no answer.
+///
+/// # Errors
+/// Propagates write errors.
+pub fn zoned_context(
+    w: &mut impl Write,
+    mode: ColorMode,
+    spans: &[Span],
+    step: usize,
+    provider: &str,
+) -> std::io::Result<()> {
+    let total: usize = spans.iter().map(|s| s.tokens).sum();
+    if mode == ColorMode::None {
+        return zones_plain(w, spans, total);
+    }
+
+    let totals = crate::zones::totals(spans);
+    writeln!(
+        w,
+        "{} {} {SUB} step {step} {SUB} {provider} {SUB} {total} tokens {SUB} {} zones",
+        paint(accent(mode), &ACTION.to_string()),
+        paint(accent(mode), "context"),
+        totals.len()
+    )?;
+    writeln!(w)?;
+    for (z, t) in &totals {
+        let st = zone_style(mode, *z);
+        // Pad BEFORE painting: escape bytes are invisible but they do
+        // count against a `{:<width}` format, which silently ruins the
+        // column alignment the bars exist to provide.
+        writeln!(
+            w,
+            "  {} {} {:>7} {:>3}%",
+            paint(st, &format!("{:<12}", z.name())),
+            paint(st, &bar(*t, total)),
+            t,
+            pct_of(*t, total)
+        )?;
+    }
+
+    let marked: Vec<&Span> = spans
+        .iter()
+        .filter(|s| matches!(s.evidence, Evidence::Marker(_)))
+        .collect();
+    writeln!(w)?;
+    writeln!(
+        w,
+        "  {}",
+        paint(
+            dim(),
+            &format!(
+                "structural zones are exact; {} span(s) named by a text marker",
+                marked.len()
+            )
+        )
+    )?;
+
+    for s in spans {
+        let st = zone_style(mode, s.zone);
+        let ev = match &s.evidence {
+            Evidence::Structural => String::new(),
+            Evidence::Marker(m) => format!(" {SUB} marker {m}"),
+        };
+        writeln!(w)?;
+        writeln!(
+            w,
+            "{} {} {SUB} {} {SUB} {} tok{}",
+            paint(st, &HZ.to_string().repeat(2)),
+            paint(st, s.zone.name()),
+            s.label,
+            s.tokens,
+            paint(dim(), &ev)
+        )?;
+        for line in s.text.lines() {
+            writeln!(w, "{}", paint(st, line))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

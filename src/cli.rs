@@ -91,6 +91,11 @@ pub enum Cmd {
         /// Open the interactive pager (ignored when piped / `--json`).
         #[arg(long)]
         tui: bool,
+
+        /// F4 — split the context into semantic zones instead of dumping
+        /// the raw wire body.
+        #[arg(long)]
+        zones: bool,
     },
 
     /// F3 — per-step context diff (default: step N vs N-1).

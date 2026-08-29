@@ -92,6 +92,29 @@ pub fn oneshot(
     Ok(())
 }
 
+/// F4 — the zoned split of one step, rendered or serialized.
+///
+/// Lives here rather than inline in `run_app` so the dispatch stays a
+/// dispatch: the JSON-vs-render choice is F4's business, not the CLI's.
+///
+/// # Errors
+/// Propagates a body parse failure or a write error.
+pub fn zoned(
+    w: &mut impl Write,
+    mode: crate::color::ColorMode,
+    sel: &SelectedStep,
+    as_json: bool,
+) -> crate::Result<()> {
+    let provider = sel.provider.unwrap_or(Provider::OpenAiCompat);
+    let spans = crate::zones::split(provider, sel.body.as_bytes())?;
+    if as_json {
+        writeln!(w, "{}", serde_json::to_string_pretty(&spans)?)?;
+    } else {
+        crate::render::zoned_context(w, mode, &spans, sel.index, provider_label(sel.provider))?;
+    }
+    Ok(())
+}
+
 /// `--json`: metadata + the verbatim body as a JSON string.
 ///
 /// # Errors

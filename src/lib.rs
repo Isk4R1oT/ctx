@@ -21,6 +21,7 @@ pub mod timeline;
 pub mod tokenizer;
 pub mod view;
 pub mod window;
+pub mod zones;
 
 pub use error::{Error, Result};
 
@@ -106,9 +107,19 @@ pub async fn run_app(cli: Cli) -> Result<i32> {
             out.flush()?;
             Ok(0)
         }
-        Some(Cmd::View { path, step, tui }) => {
+        Some(Cmd::View {
+            path,
+            step,
+            tui,
+            zones,
+        }) => {
             let timeline = store::load(&path)?;
             let sel = view::select(&timeline, step)?;
+            if zones {
+                view::zoned(&mut out, stdout_mode, &sel, cli.json)?;
+                out.flush()?;
+                return Ok(0);
+            }
             if cli.json {
                 view::json(&mut out, &sel)?;
             } else if view::should_page(tui, stdout_tty, stdin_tty) {
