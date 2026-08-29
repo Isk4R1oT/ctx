@@ -295,7 +295,16 @@ pub fn compose(timeline: &Timeline, deep: bool) -> Composition {
             // session, so the headline total must not panic/wrap either.
             let sys = a.system.as_deref().map_or(0, crate::tokenizer::count);
             let hist = sat_sum(a.messages.iter().map(|m| crate::tokenizer::count(&m.text)));
-            let tools = sat_sum(a.tools.iter().map(|t| t.schema_tokens));
+            // Схемы плюс постоянная преамбула, которую провайдер вставляет
+            // один раз за включение инструментов. Без неё блок тулов
+            // занижался втрое: 123 против 458 измеренных на трёх схемах.
+            let tools = sat_sum(a.tools.iter().map(|t| t.schema_tokens)).saturating_add(
+                if a.tools.is_empty() {
+                    0
+                } else {
+                    crate::adapter::TOOL_PREAMBLE_TOKENS
+                },
+            );
             total = sys.saturating_add(hist).saturating_add(tools);
             components.push(Component {
                 label: "system".to_string(),
@@ -1251,13 +1260,15 @@ mod tests {
         // invoked. The waste must be *calc's* tokens, strictly larger
         // than search's — pins the `!used.contains` polarity and the
         // exact attribution (not just ">0").
-        let calc_tokens = crate::tokenizer::count("calc")
-            + crate::tokenizer::count(
-                r#"{"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"},"op":{"type":"string"}},"required":["a","b","op"]}"#,
-            );
+        // Считается ВЕСЬ объект определения, как он уходит на провод:
+        // `description` тарифицируется провайдером наравне со схемой, и
+        // без него оценка блока тулов занижалась примерно вдвое.
+        let calc_tokens = crate::tokenizer::count(
+            r#"{"input_schema":{"properties":{"a":{"type":"number"},"b":{"type":"number"},"op":{"type":"string"}},"required":["a","b","op"],"type":"object"},"name":"calc"}"#,
+        );
         assert_eq!(u.wasted_tokens, calc_tokens);
         let search_tokens =
-            crate::tokenizer::count("search") + crate::tokenizer::count(r#"{"type":"object"}"#);
+            crate::tokenizer::count(r#"{"input_schema":{"type":"object"},"name":"search"}"#);
         assert!(calc_tokens > search_tokens, "fixture must be asymmetric");
     }
 

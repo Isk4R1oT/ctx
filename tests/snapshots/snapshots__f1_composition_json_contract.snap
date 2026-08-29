@@ -5,41 +5,41 @@ expression: "compose(&f1_fixture(), true)"
 ---
 {
   "focus_step": 1,
-  "total_tokens": 48,
+  "total_tokens": 271,
   "components": [
     {
       "label": "system",
       "tokens": 11,
-      "pct": 22
+      "pct": 4
     },
     {
       "label": "tool-schemas",
-      "tokens": 12,
-      "pct": 25
+      "tokens": 235,
+      "pct": 86
     },
     {
       "label": "history",
       "tokens": 25,
-      "pct": 52
+      "pct": 9
     }
   ],
   "tools_deep": [
     {
       "label": "tool:search",
-      "tokens": 6,
-      "pct": 12
+      "tokens": 13,
+      "pct": 4
     },
     {
       "label": "tool:calc",
-      "tokens": 6,
-      "pct": 12
+      "tokens": 13,
+      "pct": 4
     }
   ],
   "indictments": [
     {
       "code": "unused-loaded-tools",
       "detail": "1 of 2 loaded tools never called this run",
-      "wasted_tokens": 6
+      "wasted_tokens": 13
     },
     {
       "code": "duplicate-block",

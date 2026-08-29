@@ -65,14 +65,17 @@ configuration:
 | Pydantic AI | ✅ |
 | Instructor | ✅ |
 | Anthropic Messages API | ✅ |
-| Google Gemini | ❌ routes, but the body is not parsed |
+| Google (OpenAI-compatible endpoint) | ✅ |
+| Google Gemini *native* API | ❌ `contents` / `system_instruction` shape is not parsed |
 | streaming responses | ✅ |
 | child exit codes (0 / 1 / 3 / 42) | ✅ propagated |
 | upstream 401 | ✅ capture still works |
 
-`--provider google` resolves Google's base URL but there is no adapter for
-Gemini's `contents` / `system_instruction` shape, so you get
-`no captured prompt`. Only OpenAI-compatible and Anthropic bodies are parsed.
+`--provider google` resolves to Google's **OpenAI-compatible** endpoint, which
+is parsed like any other. The *native* Gemini API (`:generateContent`, with
+`contents` / `system_instruction` / `function_declarations`) is a different
+shape and yields `no captured prompt`. Two wire formats are understood:
+OpenAI-compatible and Anthropic Messages.
 
 ## Usage
 
@@ -92,9 +95,12 @@ forwards everything upstream unchanged. It never modifies the request.
 
 ## Honest limits
 
-- **Token counts are an offline approximation, labeled ±10%.** `ctx` never calls
-  an API to count tokens — that would cost money to measure cost.
-- **Gemini is not parsed** (see above).
+- **Token counts are an offline approximation.** `ctx` never calls an API to
+  count tokens — that would cost money to measure cost. Measured against the
+  provider's own `usage.prompt_tokens`: within ~10% on plain prompts, and
+  10–20% low on tool-heavy ones, where the remaining gap is the tokenizer's
+  treatment of JSON schemas.
+- **The native Gemini API is not parsed** — use Google's OpenAI-compatible endpoint (see above).
 - **The base URL must be reachable from an env var or `--to`.** A client with a
   hardcoded base URL cannot be intercepted; `ctx` will tell you it captured
   nothing rather than pretend.

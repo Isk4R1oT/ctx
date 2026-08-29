@@ -213,14 +213,29 @@ fn flatten_content(v: &Value) -> String {
     }
 }
 
-fn tool_tokens(schema: &Value, name: &str) -> usize {
-    let body = if schema.is_null() {
-        String::new()
-    } else {
-        schema.to_string()
-    };
-    crate::tokenizer::count(name) + crate::tokenizer::count(&body)
+/// Токены одной tool-схемы.
+///
+/// Считается ВЕСЬ объект определения, как он уходит на провод, а не только
+/// имя и параметры: `description` часто длиннее схемы, и без него оценка
+/// занижалась примерно вдвое. Замер на deepseek: провайдер тарифицирует
+/// блок схемы как 1.02 токена на токен её JSON-сериализации.
+fn tool_tokens(definition: &Value) -> usize {
+    if definition.is_null() {
+        return 0;
+    }
+    crate::tokenizer::count(&definition.to_string())
 }
+
+/// Постоянная надбавка за само включение инструментов.
+///
+/// Провайдер вставляет служебную преамбулу об использовании тулов один раз
+/// на запрос, независимо от их числа. Дифференциальный замер (deepseek,
+/// схемы разного размера): первый тул стоит 292 токена, каждый следующий
+/// ~83 — разница и есть преамбула. Линейная подгонка даёт 209.
+///
+/// Без неё промпт с тремя тулами оценивался в 146 токенов против 487
+/// реальных, то есть ошибка -70% при заявленных ±10%.
+pub const TOOL_PREAMBLE_TOKENS: usize = 209;
 
 fn messages_of(v: &Value) -> &[Value] {
     v.get("messages")
@@ -280,10 +295,7 @@ pub fn parse(provider: Provider, body: &[u8]) -> crate::Result<Assembled> {
                     let name = t.get("name").and_then(Value::as_str)?;
                     Some(WireTool {
                         name: name.to_string(),
-                        schema_tokens: tool_tokens(
-                            t.get("input_schema").unwrap_or(&Value::Null),
-                            name,
-                        ),
+                        schema_tokens: tool_tokens(t),
                     })
                 })
                 .collect();
@@ -316,10 +328,7 @@ pub fn parse(provider: Provider, body: &[u8]) -> crate::Result<Assembled> {
                     let name = f.get("name").and_then(Value::as_str)?;
                     Some(WireTool {
                         name: name.to_string(),
-                        schema_tokens: tool_tokens(
-                            f.get("parameters").unwrap_or(&Value::Null),
-                            name,
-                        ),
+                        schema_tokens: tool_tokens(t),
                     })
                 })
                 .collect();

@@ -1,20 +1,21 @@
 ---
 source: tests/snapshots.rs
+assertion_line: 124
 expression: s
 ---
-[1m[38;2;217;119;87m⏺[0m Composition [2mstep 1 · 48 tokens[0m
-  [2m⎿[0m [2msystem · 22% · 11 tok[0m
-  [2m⎿[0m [2mtool-schemas · 25% · 12 tok[0m
-  [2m⎿[0m [2mhistory · 52% · 25 tok[0m
-     [2m·[0m [2mtool:search · 12% · 6 tok[0m
-     [2m·[0m [2mtool:calc · 12% · 6 tok[0m
+[1m[38;2;217;119;87m⏺[0m Composition [2mstep 1 · 271 tokens[0m
+  [2m⎿[0m [2msystem · 4% · 11 tok[0m
+  [2m⎿[0m [2mtool-schemas · 86% · 235 tok[0m
+  [2m⎿[0m [2mhistory · 9% · 25 tok[0m
+     [2m·[0m [2mtool:search · 4% · 13 tok[0m
+     [2m·[0m [2mtool:calc · 4% · 13 tok[0m
 
 [1m[38;2;217;119;87mWaste[0m
-  [2m⎿[0m [2munused-loaded-tools · ~6 tok · 1 of 2 loaded tools never called this run[0m
+  [2m⎿[0m [2munused-loaded-tools · ~13 tok · 1 of 2 loaded tools never called this run[0m
   [2m⎿[0m [2mduplicate-block · ~9 tok · step 1: 1 verbatim-duplicated block(s) in one prompt[0m
   [2m⎿[0m [2mrepeated-block-across-turns · ~9 tok · 1 block(s) re-sent verbatim across >=2 turns[0m
   [2m⎿[0m [2munpruned-history · ~25 tok · history grew 1->3 msgs over 2 turns, never pruned (25 tok carried after turn 0)[0m
   [2m⎿[0m [2mpreamble-repay · ~11 tok · system prompt re-paid: 1 extra payment(s) across 1 variant(s)[0m
 
 [1m[38;2;217;119;87mSummary[0m
-  [2m48 tokens · 5 finding(s) · offline o200k approximation, ±10% (never calls an API)[0m
+  [2m271 tokens · 5 finding(s) · offline o200k approximation, ±10% (never calls an API)[0m

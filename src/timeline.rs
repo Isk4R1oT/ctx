@@ -206,6 +206,13 @@ impl Timeline {
                         .map(|m| crate::tokenizer::count(&m.text))
                         .sum::<usize>()
                     + a.tools.iter().map(|t| t.schema_tokens).sum::<usize>()
+                    // Та же постоянная преамбула, что и в compose: иначе
+                    // строка шага и итог по составу расходятся между собой.
+                    + if a.tools.is_empty() {
+                        0
+                    } else {
+                        crate::adapter::TOOL_PREAMBLE_TOKENS
+                    }
             },
         );
         let index = self.steps.len();

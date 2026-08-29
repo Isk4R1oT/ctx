@@ -41,13 +41,13 @@ expression: fixture()
         "tools": [
           {
             "name": "search",
-            "schema_tokens": 6
+            "schema_tokens": 13
           }
         ],
         "sampling": [],
         "non_text": []
       },
-      "prompt_tokens": 9
+      "prompt_tokens": 225
     },
     {
       "index": 1,
